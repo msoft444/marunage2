@@ -1,43 +1,29 @@
 # [SYSTEM] Maru-nage v2: TDD Protocol & State
-> **【AIへの絶対命令 / SYSTEM INSTRUCTION】**
-> このファイルはプロジェクトの「現在の状態」と「あなたの更新ルール」を定義した仕様書です。
-> 作業完了後、必ず各セクションの **[RULE]** と **[FORMAT]** に従って内容を書き換え、回答の最後に更新後の全文をMarkdownコードブロックで出力してください。
 
-## 1. 🚩 Execution Context (実行状態)
-> **[RULE]** > - `Status` は現在地を示します。作業開始時は `IN_PROGRESS`、作業完了時は `PENDING_AUDIT`（監査待ち）に変更してください。
-> - `Current Objective` は「今まさに解決すべき1つの目標」です。簡潔に記載してください。
+## 1. 🚩 Execution Context
+- **Phase:** Phase X (Short execution label)
+- **Status:** IN_PROGRESS
+- **Current Objective:** 今回の chat で完了させる 1 つの実装目標を簡潔に書く
+- **Relevant Docs:** `docs/<basic-design-doc>.md`, `docs/<destructive-test-design-doc>.md`
+- **Last Audit:** N/A
 
-- **Phase:** Phase 2 (Input Enhancement & Real-time Ops)
-- **Status:** PENDING
-- **Current Objective:** タスク作成時に「対象リポジトリのパス」を指定できるようにする
-- **Last Audit:** APPROVED (Phase 1)
+## 2. 📝 Activity Log
+- 2026-03-07 [System]: プロトコルテンプレートを初期化。
+- 2026-03-08 [System]: `docs/` を永続的な要件・設計の正本、`.tdd_protocol.md` を実行状態トラッカーとして扱う運用へ更新。
 
-## 2. 📝 Activity Log (活動履歴)
-> **[FORMAT]** `- YYYY-MM-DD [実行者モデル名]: 完了した作業の簡潔な要約`
-> **[RULE]** 作業が完了するたびに、リストの**一番下**に新しい行を追加してください。過去の履歴は消さないこと。
+## 3. 🎯 Next Actions
+- [ ] **Docs**: `docs/` 配下で基本設計と非機能要件を更新し、`Relevant Docs` を最新化する。
+- [ ] **Docs**: `docs/` 配下で破壊的テスト設計を更新し、異常系を含む合格基準を確定する。
+- [ ] **Design**: 実装前に依存点や破壊範囲の調査が必要なら、その調査タスクを明示して改修対象を確定する。
+- [ ] **TDD**: RED テストを先に追加し、失敗を確認してから実装に入る。
+- [ ] **Implementation**: GREEN まで実装し、必要なら REFACTOR を行う。
+- [ ] **Audit**: 監査やレビューで確認すべき観点があれば追記する。
 
-- 2026-03-07 [System]: 命令系統を分離し、プロトコルファイルの自己記述仕様を定義。
-- 2026-03-07 [System]: Phase 2 へ移行。リポジトリ指定機能の実装待ち。
-
-## 3. 🎯 Next Actions (詳細な実装タスク)
-> **[RULE]** > - `Current Objective` を達成するための具体的なTODOリストです。
-> - TDDの原則に従い、必ず「テストの要件（異常系など）」を含めてください。
-> - タスクを完了したら、行頭の `[ ]` を `[x]` に変更してください。
-
-- [ ] **Backend**: `POST /api/v1/tasks` で `repository_path` (string) を受け取るようAPIスキーマを変更。
-- [ ] **Agent**: エージェントプロセス実行時、指定されたパスを `cwd` として動作するように修正。
-- [ ] **Security**: 指定されたパスが存在するか、またシステム領域等への不正アクセスでないかのバリデーションを実装。
-- [ ] **TDD**: 「存在しないパスを指定した際に 400 エラーを返す」テストを最初に記述し、Redを確認してから実装すること。
-
-## 4. ❌ Audit Findings (監査からの指摘事項)
-> **[RULE]** > - 監査役（Opusなど）から `REJECTED` 判定を受けた場合、その指摘内容をここに転記します。
-> - 修正作業（ffコマンド等）が完了し、テストが通ったら、この項目は `(None)` にリセットしてください。
-
+## 4. ❌ Audit Findings
 - (None)
 
-## 5. 📊 Test Metrics (テスト結果)
-> **[RULE]** 作業の最後にpytest等を実行し、その結果の数値を正確に反映させてください。Failedが1以上の場合は完了報告をしてはいけません。
-
-- Total: 88
-- Passed: 88
+## 5. 📊 Test Metrics
+- Total: 0
+- Passed: 0
 - Failed: 0
+- Skipped: 0

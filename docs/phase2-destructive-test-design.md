@@ -261,14 +261,14 @@
 
 - **攻撃シナリオ:** バグまたは悪意により、`succeeded` 状態のタスクが `running` に戻される。テスト結果とアーティファクトは既に参照されており、再実行は矛盾した状態を生む。
 - **Red 条件:** 終端状態（`succeeded`、`failed`、`cancelled`）から非終端状態への遷移が成功する。
-- **Green 条件:** DB アクセッサーが状態遷移ルールを強制する。許可される遷移は以下のみとする。`queued → leased → running → {succeeded | failed | blocked | waiting_approval}`、`blocked → queued`（再試行時）、`waiting_approval → {succeeded | cancelled}`、`running → cancelled`（強制停止時）。終端状態からの遷移は DB レベルまたはアクセッサーレベルで拒否する。
+- **Green 条件:** DB アクセッサーが状態遷移ルールを強制する。許可される遷移は以下のみとする。`queued → leased`、`leased → {running | blocked | cancelled}`、`running → {succeeded | failed | blocked | waiting_approval | cancelled}`、`blocked → queued`（再試行時）、`waiting_approval → {succeeded | cancelled}`。終端状態（`succeeded`、`failed`、`cancelled`）からの遷移は DB レベルまたはアクセッサーレベルで拒否する。
 - **検証対象:** §1.1、§1.4
 
 ### TS-02: 二重リースの発生
 
 - **攻撃シナリオ:** Brain の 2 つのワーカースレッドがほぼ同時に同一タスクをリースしようとする。`FOR UPDATE` は同一トランザクション内では排他制御するが、SELECT の結果を確認してから UPDATE するまでの間にタイムアウトやデッドロック検知による自動ロールバックが発生した場合、リトライロジックが同一タスクを再度リースする可能性がある。
 - **Red 条件:** 同一タスクに対して異なる `lease_owner` が記録され、2 つのワーカーが同時に実行する。
-- **Green 条件:** リース取得は単一の原子的 UPDATE 文（`UPDATE tasks SET status='leased', lease_owner=? WHERE id=? AND status='queued'` の affected rows = 1 で成功判定）とし、SELECT + UPDATE の 2 ステップにしない。
+- **Green 条件:** タスク取得は同一トランザクション内で `SELECT ... FOR UPDATE SKIP LOCKED` による候補選定と、原子的 `UPDATE tasks SET status='leased', lease_owner=? WHERE id=? AND status='queued'` の `affected rows = 1` での成功判定を組み合わせる。`SKIP LOCKED` により他ワーカーがロック中の行をスキップし、同一タスクに対する二重リースを防止する。
 - **検証対象:** §1.4
 
 ### TS-03: lease_expires_at 設定値の不適切さ
@@ -295,7 +295,7 @@
 
 - **攻撃シナリオ:** 管理 AI と作業 AI が `contract_digest` の算出に異なるフィールド順序、JSON シリアライズ形式、ハッシュアルゴリズムを使用する。結果として正当な契約が検証失敗し、すべてのタスクが `blocked` になる。
 - **Red 条件:** 正当なモデル契約が検証不一致で `blocked` となる。
-- **Green 条件:** `contract_digest` の算出仕様を以下のとおり固定する。(1) 対象フィールドは `phase`, `model`, `cli_profile`, `fallback_allowed`, `contract_version` の5つとし、この順序で結合する。(2) JSON は RFC 8785（JCS: JSON Canonicalization Scheme）に従って正規化する。(3) ハッシュは SHA-256 とし、hex 表現で格納する。(4) 算出ロジックは共通ライブラリとして単一実装を使用する。
+- **Green 条件:** `contract_digest` の算出仕様を以下のとおり固定する。(1) 対象フィールドは `phase`, `model`, `cli_profile`, `fallback_allowed`, `contract_version` の5つとする。(2) JSON はキーのアルファベット順でソートし、最小区切り（`separators=(",",":")`、`ensure_ascii=False`）で正規化する。(3) ハッシュは SHA-256 とし、hex 表現で格納する。(4) 算出ロジックは `ModelContractCodec` クラスとして共通ライブラリに単一実装する。
 - **検証対象:** §1.5
 
 ### MC-02: Copilot CLI のモデルエイリアス問題
@@ -352,7 +352,7 @@
 
 - **攻撃シナリオ:** AI が生成した `messages.content_md` に、Markdown のインラインHTML として `<script>` タグや `onerror` イベントハンドラを含む画像タグが埋め込まれる。Dashboard の詳細画面がこれをそのままレンダリングし、ブラウザ上で任意スクリプトが実行される。
 - **Red 条件:** `content_md` 内の HTML がブラウザ上でスクリプト実行可能な状態でレンダリングされる。
-- **Green 条件:** (1) Markdown レンダリング時に HTML サニタイズを適用し、許可タグ（`p`, `h1`-`h6`, `ul`, `ol`, `li`, `code`, `pre`, `table`, `a`, `img`, `em`, `strong`, `blockquote`）のみを通過させる。(2) `a` タグの `href` は `http`/`https` スキームのみ許可する。(3) `img` タグの `src` は内部 URL のみ許可する。(4) イベントハンドラ属性を全除去する。
+- **Green 条件:** (1) Markdown レンダリング時に HTML サニタイズを適用し、許可タグ（`a`, `p`, `br`, `code`, `pre`, `strong`, `em`, `ul`, `ol`, `li`）のみを通過させる。(2) `a` タグの `href` は `http`/`https`/`mailto` スキームのみ許可し、`a` タグの属性は `href` と `title` のみを許可する。(3) イベントハンドラ属性を全除去する。
 - **検証対象:** §2.2 開発履歴詳細画面
 
 ### UI-02: 大量メッセージによるタイムライン表示の崩壊

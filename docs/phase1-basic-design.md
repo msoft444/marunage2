@@ -112,10 +112,10 @@
 
 ### 1.4 タスク取得と同期方式
 
-共通 DB アクセッサーは `SELECT ... FOR UPDATE` で `tasks` をロックし、以下の順で取得する。
+共通 DB アクセッサーは `SELECT ... FOR UPDATE SKIP LOCKED` で `tasks` をロックし、以下の順で取得する。
 
-1. `status = 'queued'` かつ `assigned_service = 自サービス` を優先度順に選択する。
-2. 選択行を `FOR UPDATE` でロックし、`status = 'leased'`、`lease_owner`、`lease_expires_at` を更新する。
+1. `status = 'queued'` かつ `assigned_service = 自サービス` を優先度順に選択する。`FOR UPDATE SKIP LOCKED` により、他ワーカーがロック中の行を自動的にスキップする。
+2. 同一トランザクション内で原子的 `UPDATE ... WHERE id = ? AND status = 'queued'` を実行し、`status = 'leased'`、`lease_owner`、`lease_expires_at` を更新する。`affected rows = 0` の場合はリース失敗とする。
 3. 実行開始時に `running` へ遷移する。
 4. ハートビート更新が途切れ、`lease_expires_at` を超えたタスクは Guardian または同一サービスが再取得判定する。
 
@@ -145,7 +145,9 @@
 3. `cli_profile`: Copilot CLI に渡すプロファイル名または明示引数定義
 4. `fallback_allowed`: 常に `false`
 5. `contract_version`: ポリシーバージョン
-6. `contract_digest`: 管理 AI が記録した整合性ハッシュ
+6. `allowed_aliases`: （任意）CLI がモデル名をエイリアス解決した場合に許容されるモデル名のリスト
+
+`contract_digest` は上記 `phase`、`model`、`cli_profile`、`fallback_allowed`、`contract_version` の 5 フィールドをキーのアルファベット順で JSON 正規化（`sort_keys=True`、区切り `(",",":")`）し、SHA-256 hex で算出する。契約 JSON の格納フィールドではなく、`ModelContractCodec.digest()` で都度計算する。
 
 作業 AI は実行前に `assigned_model` と `model_contract_json.model` の一致を検証し、一致しない場合はタスクを `blocked` に遷移する。CLI 起動時は契約に記載された引数のみを許可し、実際に起動したモデル名を `logs.event_type = 'model_validated'` と `cli_started` に記録する。
 
@@ -336,9 +338,9 @@ HTTP API はナレッジ操作だけとする。
 
 本系とのポート衝突を避けるため、ポート予約は DB ロック付きアロケータ方式にする。
 
-1. `tasks` にブートストラップ時から `task_type = 'port_allocator'` の単一行を常駐させる。
-2. 管理 AI はポート割当時にこの行を `SELECT ... FOR UPDATE` でロックする。
-3. サービスごとに予約レンジを分ける。例として Dashboard 18080-18179、Librarian 18180-18279、検証用 MariaDB 18300-18399 を使う。
+1. `port_allocator` テーブルにサービスごとの行をブートストラップ時から常駐させる。各行は `service_name`、`port_range_start`、`port_range_end`、`last_allocated_port`、`reservation_state_json`、`lease_owner`、`lease_expires_at` を保持する。
+2. 管理 AI はポート割当時に対象サービスの行を `SELECT ... FOR UPDATE` でロックする。
+3. サービスごとに予約レンジを分ける。Dashboard 18080-18179、Librarian 18180-18279、検証用 MariaDB 18300-18399 を使う。
 4. 初回候補は `root_task_id` のハッシュで決定し、同一依頼で再現可能にする。
 5. Docker 上の使用状況とホストの待受状況を両方確認する。
 6. 衝突時は次候補へ進み、指数バックオフではなく短い固定バックオフとジッタで最大 8 回まで再試行する。
