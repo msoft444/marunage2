@@ -1,0 +1,115 @@
+services:
+  mariadb:
+    image: mariadb:11.8
+    restart: unless-stopped
+    environment:
+      MARIADB_DATABASE: ${DB_NAME}
+      MARIADB_USER: ${DB_USER}
+      MARIADB_PASSWORD_FILE: /run/secrets/db_password
+      MARIADB_ROOT_PASSWORD_FILE: /run/secrets/db_root_password
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb-admin ping -h 127.0.0.1 -uroot -p$$(cat /run/secrets/db_root_password) --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    volumes:
+      - ./init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+      - mariadb-data:/var/lib/mysql
+    secrets:
+      - db_password
+      - db_root_password
+
+  brain:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    restart: unless-stopped
+    env_file:
+      - ${RUNTIME_ENV_FILE:-.env.runtime}
+    environment:
+      DB_PASSWORD_FILE: /run/secrets/db_password
+      GITHUB_TOKEN_FILE: /run/secrets/github_token
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    volumes:
+      - ${HOST_COPILOT_CONFIG_DIR:-/tmp/copilot-config}:${COPILOT_CONFIG_DIR:-/run/copilot}:ro
+      - ${DOCKER_SOCK:-/var/run/docker.sock}:${DOCKER_SOCK:-/var/run/docker.sock}
+    secrets:
+      - db_password
+      - github_token
+    command: ["python", "scripts/service_runner.py", "brain"]
+
+  librarian:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    restart: unless-stopped
+    env_file:
+      - ${RUNTIME_ENV_FILE:-.env.runtime}
+    environment:
+      DB_PASSWORD_FILE: /run/secrets/db_password
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    volumes:
+      - librarian-state:/tmp
+    secrets:
+      - db_password
+    command: ["python", "scripts/service_runner.py", "librarian"]
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    restart: unless-stopped
+    env_file:
+      - ${RUNTIME_ENV_FILE:-.env.runtime}
+    environment:
+      DB_PASSWORD_FILE: /run/secrets/db_password
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    secrets:
+      - db_password
+    ports:
+      - "${DASHBOARD_PORT:-18080}:18080"
+    command: ["python", "scripts/service_runner.py", "dashboard"]
+
+  guardian:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    restart: unless-stopped
+    env_file:
+      - ${RUNTIME_ENV_FILE:-.env.runtime}
+    environment:
+      DB_PASSWORD_FILE: /run/secrets/db_password
+      GITHUB_TOKEN_FILE: /run/secrets/github_token
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    volumes:
+      - ${HOST_COPILOT_CONFIG_DIR:-/tmp/copilot-config}:${COPILOT_CONFIG_DIR:-/run/copilot}:ro
+      - ${DOCKER_SOCK:-/var/run/docker.sock}:${DOCKER_SOCK:-/var/run/docker.sock}
+    secrets:
+      - db_password
+      - github_token
+    command: ["python", "scripts/service_runner.py", "guardian"]
+
+secrets:
+  db_password:
+    file: ./secrets/db_password
+  db_root_password:
+    file: ./secrets/db_root_password
+  github_token:
+    file: ./secrets/github_token
+
+volumes:
+  mariadb-data:
+  librarian-state:

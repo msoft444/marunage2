@@ -1,0 +1,38 @@
+services:
+  mariadb:
+    image: mariadb:11.8
+    environment:
+      MARIADB_DATABASE: marunage2
+      MARIADB_USER: marunage
+      MARIADB_PASSWORD: marunage-password
+      MARIADB_ROOT_PASSWORD: marunage-root-password
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb-admin ping -h 127.0.0.1 -uroot -p$${MARIADB_ROOT_PASSWORD} --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    tmpfs:
+      - /tmp
+      - /var/lib/mysql/tmp
+    volumes:
+      - ./init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+
+  tests:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    environment:
+      DB_HOST: mariadb
+      DB_PORT: "3306"
+      DB_NAME: marunage2
+      DB_USER: marunage
+      DB_PASSWORD: marunage-password
+      HEALTHCHECK_TIMEOUT_SEC: "5"
+      MARIADB_INTEGRATION: "1"
+      REQUIRED_ENV_VARS: "DB_HOST,DB_PORT,DB_NAME,DB_USER,DB_PASSWORD"
+    command: ["python", "-m", "pytest", "-q"]
