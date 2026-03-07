@@ -11,12 +11,12 @@
 1. 外部 LLM API は使用しない。GitHub 認証は `gh auth token` で取得した `GITHUB_TOKEN` のみを利用する。
 2. コンテナはホストの `.copilot` ディレクトリに依存してはならない。
 3. `secrets/github_token` ファイルは廃止し、トークンをファイルへ永続化しない。
-4. `brain` と `guardian` を含む必要なコンテナは、起動時に `GITHUB_TOKEN` を環境変数として受け取れること。
+4. `brain`、`guardian`、`dashboard`、`librarian` の各コンテナは、起動時に `GITHUB_TOKEN` を環境変数として受け取れること。
 5. ホスト側で `gh` が未導入、未ログイン、または空トークンを返した場合は、コンテナ起動前に即座に失敗させること。
 
 ## 1.1 非機能要件
 
-1. セキュリティ: GitHub トークンはファイルへ永続化せず、コンテナ内でも不要なサービスへ注入しない。
+1. セキュリティ: GitHub トークンはファイルへ永続化せず、Maru-nage の実行対象コンテナ群の外へ漏らさない。
 2. 可観測性: 起動失敗はホスト側で即時に判定でき、失敗理由を標準エラーへ明示する。
 3. 運用性: 開発者は `gh auth login` 済みであれば追加の secret ファイル作成なしに起動できる。
 4. 保守性: 認証経路は `gh auth token` -> `GITHUB_TOKEN` に一本化し、`.copilot` マウントや `github_token` secret との二重運用を残さない。
@@ -34,8 +34,8 @@
 
 - `docker-compose.prod.yml` から `.copilot` のホストマウント設定を削除する。
 - `docker-compose.prod.yml` から `github_token` secret と `GITHUB_TOKEN_FILE` 設定を削除する。
-- `brain` と `guardian` は `GITHUB_TOKEN` を必須環境変数として扱う。
-- `dashboard` と `librarian` は本当に必要な環境変数のみを受け取り、不要な認証情報は渡さない。
+- `brain`、`guardian`、`dashboard`、`librarian` は `GITHUB_TOKEN` を必須環境変数として扱う。
+- `GITHUB_TOKEN` は Maru-nage のアプリケーションコンテナ群へ統一的に注入し、`GITHUB_TOKEN_FILE` や secret ファイルとの二重運用を残さない。
 
 ### 2.3 障害時の扱い
 
@@ -57,7 +57,7 @@
 ### 3.2 期待される変更
 
 - Compose は `env_file` と実行時環境変数の組み合わせで `GITHUB_TOKEN` を受け取る。
-- `entrypoint.sh` は `GITHUB_TOKEN_FILE` なしでも動作し、必要サービスで `GITHUB_TOKEN` の存在を検証する。
+- `entrypoint.sh` は `GITHUB_TOKEN_FILE` なしでも動作し、各アプリケーションサービスで `GITHUB_TOKEN` の存在を検証する。
 - 初期化スクリプトと運用手順書は `secrets/github_token` の作成や記入を要求しない。
 - テストは、secret 依存の除去、`GITHUB_TOKEN` 注入、起動前失敗条件の検証をカバーする。
 
@@ -65,7 +65,7 @@
 
 1. `docker-compose.prod.yml` に `.copilot` マウント設定が存在しない。
 2. `docker-compose.prod.yml` に `github_token` secret と `GITHUB_TOKEN_FILE` が存在しない。
-3. ホスト側の起動導線が `gh auth token` を使って `GITHUB_TOKEN` を注入できる。
+3. ホスト側の起動導線が `gh auth token` を使って全アプリケーションコンテナ向けの `GITHUB_TOKEN` を注入できる。
 4. `gh` 未導入・未ログイン・空トークンの各ケースで、コンテナ起動前に失敗する。
 5. 運用ドキュメントが新しい起動手順を説明している。
 

@@ -65,7 +65,7 @@
 1. `docker-compose.prod.yml` に `.copilot` マウントが残っていないこと。
 2. `docker-compose.prod.yml` に `github_token` secret と `GITHUB_TOKEN_FILE` が残っていないこと。
 3. ホスト側起動導線が `gh` 未導入・未ログイン・空トークンで失敗すること。
-4. `brain` と `guardian` が `GITHUB_TOKEN` を必須として扱うこと。
+4. `brain`、`guardian`、`dashboard`、`librarian` が `GITHUB_TOKEN` を必須として扱うこと。
 5. DB 用 secret 運用には回帰がないこと。
 
 ## 4. 関連ドキュメント
