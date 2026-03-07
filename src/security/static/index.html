@@ -15,10 +15,10 @@
           <p class="subtitle">Brain / Librarian / Guardian / Dashboard の運用管制画面</p>
         </div>
         <nav id="sidebar-nav" aria-label="Primary">
+          <a href="#/tasks">Task Queue</a>
+          <a href="#/tasks/new">New Request</a>
           <a href="#overview">Overview</a>
           <a href="#services">Services</a>
-          <a href="#timeline">Timeline</a>
-          <a href="#approvals">Approvals</a>
         </nav>
       </aside>
       <main class="shell-main">
@@ -59,17 +59,57 @@
             <pre id="api-health-output">Loading /api/v1/health ...</pre>
           </article>
         </section>
-        <section id="timeline" class="panel">
-          <h3>Recent Timeline</h3>
-          <ol id="timeline-feed">
-            <li>Knowledge sync completed for release checklist PDF.</li>
-            <li>Guardian classified previous restart failure as transient.</li>
-            <li>Dashboard UI served from static assets.</li>
-          </ol>
-        </section>
-        <section id="approvals" class="panel">
-          <h3>Approval Queue</h3>
-          <p>現在は promote_release が 1 件待機しています。承認操作は API プレフィックス配下から行います。</p>
+        <section class="workspace-grid">
+          <section class="panel composer-panel">
+            <div class="section-head">
+              <div>
+                <p class="kicker">Dispatch</p>
+                <h3>新規タスクを投稿</h3>
+              </div>
+              <span id="submit-state" class="badge">idle</span>
+            </div>
+            <form id="task-form" class="task-form">
+              <label>
+                <span>依頼タイトル</span>
+                <input id="task-title" name="task" type="text" placeholder="例: README を更新" required />
+              </label>
+              <label>
+                <span>実行指示</span>
+                <textarea id="task-instruction" name="instruction" rows="6" placeholder="依頼内容を具体的に記述"></textarea>
+              </label>
+              <div class="form-actions">
+                <button id="task-submit" type="submit">丸投げ実行</button>
+                <p id="task-submit-message" class="helper-text">投稿したタスクは右側の一覧から追跡できます。</p>
+              </div>
+            </form>
+          </section>
+          <section class="panel queue-panel">
+            <div class="section-head">
+              <div>
+                <p class="kicker">Tracking</p>
+                <h3>タスク一覧</h3>
+              </div>
+              <a class="ghost-link" href="#/tasks">一覧を更新</a>
+            </div>
+            <div id="task-list-view" data-route="tasks">
+              <ul id="task-list" class="task-list"></ul>
+            </div>
+            <div id="task-detail-view" data-route="task-detail" hidden>
+              <div class="detail-header">
+                <a class="ghost-link" href="#/tasks">一覧へ戻る</a>
+                <h3 id="task-detail-title">Task Detail</h3>
+              </div>
+              <dl id="task-detail-meta" class="detail-meta"></dl>
+              <section class="detail-block">
+                <h4>Logs</h4>
+                <ul id="task-detail-logs" class="log-list"></ul>
+              </section>
+              <section class="detail-block">
+                <h4>Result</h4>
+                <article id="task-detail-result" class="result-card"></article>
+              </section>
+            </div>
+          </section>
         </section>
       </main>
     </div>

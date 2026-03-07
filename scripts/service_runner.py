@@ -5,7 +5,6 @@ import os
 import signal
 import sys
 import threading
-import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -20,6 +19,7 @@ from security import SecureDashboard
 
 
 LOGGER = logging.getLogger("marunage2.service")
+MAX_POST_BODY_BYTES = 10 * 1024 * 1024
 
 
 def configure_logging() -> None:
@@ -92,16 +92,30 @@ def open_database_connection():
 class DashboardHandler(BaseHTTPRequestHandler):
     dashboard = SecureDashboard()
 
-    def do_GET(self) -> None:  # noqa: N802
-        response = self.dashboard.serve_path(self.path)
+    def _send_dashboard_response(self, response: dict) -> None:
         body = response["body"].encode("utf-8")
         self.send_response(response["status"])
         self.send_header("Content-Type", response["content_type"])
         self.send_header("Content-Length", str(len(body)))
         self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Security-Policy", "default-src 'self'")
+        self.send_header("X-Frame-Options", "DENY")
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+    def do_GET(self) -> None:  # noqa: N802
+        response = self.dashboard.serve_request("GET", self.path, body=None)
+        self._send_dashboard_response(response)
+
+    def do_POST(self) -> None:  # noqa: N802
+        content_length = int(self.headers.get("Content-Length", "0"))
+        if content_length > MAX_POST_BODY_BYTES:
+            self.send_error(413, "Payload Too Large")
+            return
+        raw_body = self.rfile.read(content_length) if content_length > 0 else b""
+        response = self.dashboard.serve_request("POST", self.path, body=raw_body.decode("utf-8"))
+        self._send_dashboard_response(response)
 
     def log_message(self, format: str, *args) -> None:  # noqa: A003
         LOGGER.info("dashboard request: " + format, *args)
@@ -111,6 +125,7 @@ def run_dashboard() -> int:
     validate_runtime_env()
     ping_database()
     port = int(os.getenv("DASHBOARD_PORT", "18080"))
+    DashboardHandler.dashboard = SecureDashboard(connection_factory=open_database_connection)
     server = ThreadingHTTPServer(("0.0.0.0", port), DashboardHandler)
     LOGGER.info("dashboard listening on port %s", port)
     try:

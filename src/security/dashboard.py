@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import json
 import posixpath
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 import nh3
+
+from .secret_scanner import SecretScanner
 
 
 class SecureDashboard:
@@ -19,8 +23,17 @@ class SecureDashboard:
         ".svg": "image/svg+xml",
     }
 
-    def __init__(self, asset_root: Path | None = None):
+    def __init__(
+        self,
+        asset_root: Path | None = None,
+        db_connection: Any | None = None,
+        connection_factory: Callable[[], Any] | None = None,
+        secret_scanner: SecretScanner | None = None,
+    ):
         self.asset_root = asset_root or Path(__file__).resolve().parent / "static"
+        self.db_connection = db_connection
+        self.connection_factory = connection_factory
+        self.secret_scanner = secret_scanner or SecretScanner()
 
     def render_markdown(self, content_md: str) -> str:
         return nh3.clean(
@@ -37,8 +50,12 @@ class SecureDashboard:
         return {"promote_release_tasks": 1}
 
     def serve_path(self, request_path: str) -> dict:
+        return self.serve_request("GET", request_path, body=None)
+
+    def serve_request(self, method: str, request_path: str, body: str | None) -> dict:
         parsed = urlparse(request_path or "/")
         path = posixpath.normpath(parsed.path or "/")
+        method = method.upper()
 
         # Static UI must win over the generic API handler for `/` and `/index.html`.
         if path in {"/", "/index.html"}:
@@ -49,19 +66,240 @@ class SecureDashboard:
             return self._serve_asset(relative_path)
 
         if path.startswith("/api/v1/"):
+            return self._handle_api(method, path, body)
+
+        return self._json_response(404, {"error": "not_found", "path": path})
+
+    def _handle_api(self, method: str, path: str, body: str | None) -> dict:
+        if method == "GET" and path == "/api/v1/health":
             payload = {
                 "service": "dashboard",
                 "status": "ok",
                 "path": path,
             }
-            return {
-                "status": 200,
-                "content_type": "application/json",
-                "body": json.dumps(payload),
-                "json": payload,
-            }
+            return self._json_response(200, payload)
+
+        if path == "/api/v1/tasks":
+            if method == "GET":
+                return self._json_response(200, {"tasks": self._list_tasks()})
+            if method == "POST":
+                return self._create_task(body)
+            return self._json_response(405, {"error": "method_not_allowed", "path": path, "method": method})
+
+        if path.startswith("/api/v1/tasks/"):
+            task_id = self._parse_task_id(path)
+            if task_id is None:
+                return self._json_response(404, {"error": "task_not_found", "path": path})
+            if method != "GET":
+                return self._json_response(405, {"error": "method_not_allowed", "path": path, "method": method})
+            return self._get_task_detail(task_id)
 
         return self._json_response(404, {"error": "not_found", "path": path})
+
+    def _create_task(self, body: str | None) -> dict:
+        try:
+            request_payload = json.loads(body or "{}")
+        except json.JSONDecodeError:
+            return self._json_response(400, {"error": "invalid_json"})
+
+        if not isinstance(request_payload, dict):
+            return self._json_response(400, {"error": "invalid_payload"})
+
+        payload_text = json.dumps(request_payload, ensure_ascii=False, sort_keys=True)
+        scan_result = self.secret_scanner.scan_multistage(payload_text)
+        task_status = "blocked" if scan_result["blocked"] else "queued"
+        task_type = str(request_payload.get("task_type") or "documentation")
+        assigned_service = str(request_payload.get("assigned_service") or "brain")
+        assigned_role = str(request_payload.get("assigned_role") or assigned_service)
+        try:
+            phase = self._coerce_int_field(request_payload, "phase", 4)
+            priority = self._coerce_int_field(request_payload, "priority", 0)
+        except ValueError as error:
+            return self._json_response(400, {"error": "invalid_payload", "field": str(error)})
+        payload_json = dict(request_payload)
+        payload_json["security_scan"] = {
+            "blocked": scan_result["blocked"],
+            "decode_depth": scan_result["decode_depth"],
+        }
+
+        with self._database() as connection:
+            cursor = self._cursor(connection)
+            cursor.execute(
+                (
+                    "INSERT INTO tasks ("
+                    "root_task_id, task_type, phase, status, requested_by_role, assigned_role, assigned_service, "
+                    "priority, payload_json, retry_count, max_retry, approval_required"
+                    ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                ),
+                (
+                    0,
+                    task_type,
+                    phase,
+                    task_status,
+                    "dashboard",
+                    assigned_role,
+                    assigned_service,
+                    priority,
+                    json.dumps(payload_json, ensure_ascii=False),
+                    0,
+                    3,
+                    False,
+                ),
+            )
+            task_id = self._last_insert_id(cursor, connection)
+            cursor.execute("UPDATE tasks SET root_task_id = %s WHERE id = %s", (task_id, task_id))
+            cursor.execute(
+                (
+                    "INSERT INTO logs (task_id, root_task_id, service, component, level, event_type, message, details_json, trace_id) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                ),
+                (
+                    task_id,
+                    task_id,
+                    "dashboard",
+                    "interactive_ui",
+                    "WARN" if task_status == "blocked" else "INFO",
+                    "task_blocked" if task_status == "blocked" else "task_submitted",
+                    "Task blocked by secret scanner" if task_status == "blocked" else "Task submitted from dashboard",
+                    None,
+                    f"dashboard-{task_id}",
+                ),
+            )
+            commit = getattr(connection, "commit", None)
+            if callable(commit):
+                commit()
+
+        task = self._load_task(task_id)
+        return self._json_response(201, {"task": task, "scan": payload_json["security_scan"]})
+
+    def _coerce_int_field(self, payload: dict[str, Any], field_name: str, default: int) -> int:
+        value = payload.get(field_name, default)
+        if isinstance(value, bool):
+            raise ValueError(field_name)
+        try:
+            return int(value)
+        except (TypeError, ValueError) as error:
+            raise ValueError(field_name) from error
+
+    def _list_tasks(self) -> list[dict[str, Any]]:
+        with self._database() as connection:
+            cursor = self._cursor(connection)
+            cursor.execute(
+                (
+                    "SELECT id, root_task_id, task_type, status, assigned_service, priority, result_summary_md, created_at "
+                    "FROM tasks ORDER BY created_at DESC, id DESC LIMIT 50"
+                ),
+                (),
+            )
+            return [self._serialize_task_row(row) for row in self._fetchall(cursor)]
+
+    def _get_task_detail(self, task_id: int) -> dict:
+        task = self._load_task(task_id)
+        if task is None:
+            return self._json_response(404, {"error": "task_not_found", "task_id": task_id})
+
+        with self._database() as connection:
+            cursor = self._cursor(connection)
+            cursor.execute(
+                (
+                    "SELECT task_id, root_task_id, service, event_type, message, created_at "
+                    "FROM logs WHERE task_id = %s ORDER BY id ASC"
+                ),
+                (task_id,),
+            )
+            logs = self._fetchall(cursor)
+
+        payload = {
+            "task": task,
+            "logs": logs,
+            "result_html": self.render_markdown(task.get("result_summary_md") or ""),
+        }
+        return self._json_response(200, payload)
+
+    def _load_task(self, task_id: int) -> dict[str, Any] | None:
+        with self._database() as connection:
+            cursor = self._cursor(connection)
+            cursor.execute(
+                (
+                    "SELECT id, root_task_id, task_type, phase, status, requested_by_role, assigned_role, assigned_service, "
+                    "priority, payload_json, result_summary_md, lease_owner, lease_expires_at, started_at, finished_at, created_at "
+                    "FROM tasks WHERE id = %s"
+                ),
+                (task_id,),
+            )
+            row = self._fetchone(cursor)
+            if row is None:
+                return None
+            return self._serialize_task_row(row)
+
+    def _parse_task_id(self, path: str) -> int | None:
+        try:
+            return int(path.rsplit("/", 1)[1])
+        except (TypeError, ValueError):
+            return None
+
+    @contextmanager
+    def _database(self):
+        if self.db_connection is not None:
+            yield self.db_connection
+            return
+        if self.connection_factory is None:
+            raise RuntimeError("dashboard database unavailable")
+        connection = self.connection_factory()
+        try:
+            yield connection
+        finally:
+            close = getattr(connection, "close", None)
+            if callable(close):
+                close()
+
+    def _cursor(self, connection: Any):
+        cursor_factory = getattr(connection, "cursor", None)
+        if not callable(cursor_factory):
+            raise RuntimeError("dashboard database unavailable")
+        try:
+            return cursor_factory(dictionary=True)
+        except TypeError:
+            return cursor_factory()
+
+    def _fetchone(self, cursor) -> dict[str, Any] | None:
+        row = cursor.fetchone()
+        if row is None or isinstance(row, dict):
+            return row
+        description = getattr(cursor, "description", None)
+        columns = [column[0] for column in description]
+        return dict(zip(columns, row, strict=True))
+
+    def _fetchall(self, cursor) -> list[dict[str, Any]]:
+        fetchall = getattr(cursor, "fetchall", None)
+        rows = fetchall() if callable(fetchall) else []
+        if not rows:
+            return []
+        if isinstance(rows[0], dict):
+            return list(rows)
+        description = getattr(cursor, "description", None)
+        columns = [column[0] for column in description]
+        return [dict(zip(columns, row, strict=True)) for row in rows]
+
+    def _last_insert_id(self, cursor, connection: Any) -> int:
+        lastrowid = getattr(cursor, "lastrowid", None)
+        if lastrowid is not None:
+            return int(lastrowid)
+        insert_id = getattr(connection, "insert_id", None)
+        if callable(insert_id):
+            return int(insert_id())
+        raise RuntimeError("could not determine inserted task id")
+
+    def _serialize_task_row(self, row: dict[str, Any]) -> dict[str, Any]:
+        payload_json = row.get("payload_json")
+        if isinstance(payload_json, str):
+            try:
+                payload_json = json.loads(payload_json)
+            except json.JSONDecodeError:
+                pass
+        result = dict(row)
+        result["payload_json"] = payload_json
+        return result
 
     def _serve_asset(self, relative_path: str) -> dict:
         if "\x00" in relative_path:

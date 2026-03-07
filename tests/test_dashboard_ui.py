@@ -13,6 +13,8 @@ def test_dashboard_root_serves_marunage_ui_document():
     assert "<title>Maru-nage v2 Dashboard</title>" in response["body"]
     assert 'id="marunage-app"' in response["body"]
     assert 'id="sidebar-nav"' in response["body"]
+    assert 'id="task-form"' in response["body"]
+    assert 'id="task-detail-view"' in response["body"]
 
 
 def test_dashboard_index_html_prefers_static_ui_over_api_json():
@@ -33,7 +35,8 @@ def test_dashboard_static_asset_is_served_with_javascript_mime_type():
 
     assert response["status"] == 200
     assert response["content_type"] == "application/javascript; charset=utf-8"
-    assert "document.getElementById('marunage-app')" in response["body"]
+    assert "fetchJson('/api/v1/tasks'" in response["body"]
+    assert "window.location.hash" in response["body"]
 
 
 def test_dashboard_api_prefix_returns_json_payload():

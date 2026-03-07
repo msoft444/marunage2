@@ -9,3 +9,9 @@ __pycache__/
 *.pyc
 secrets/
 docker-compose.override.yml
+
+# Local History backup folder
+.history/
+
+# プロトコルファイル（リポジトリを公開する場合のみ追加）
+.tdd_protocol.md

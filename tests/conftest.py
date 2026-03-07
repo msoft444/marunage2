@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 from dataclasses import dataclass
@@ -21,12 +22,38 @@ class FakeCursor:
     rows: list[dict]
     rowcount: int
     task_ids: list[int] | None = None
+    lastrowid: int | None = None
 
     def fetchone(self):
         return self.rows[0] if self.rows else None
 
     def fetchall(self):
         return list(self.rows)
+
+    def close(self):
+        return None
+
+
+class FakeConnectionCursor:
+    def __init__(self, connection):
+        self.connection = connection
+        self._cursor = FakeCursor([], 0)
+        self.rowcount = 0
+        self.lastrowid = None
+
+    def execute(self, query, params=()):
+        self._cursor = self.connection._execute(query, params)
+        self.rowcount = self._cursor.rowcount
+        self.lastrowid = self._cursor.lastrowid
+
+    def fetchone(self):
+        return self._cursor.fetchone()
+
+    def fetchall(self):
+        return self._cursor.fetchall()
+
+    def close(self):
+        return None
 
 
 class FakeMariaDBConnection:
@@ -71,6 +98,8 @@ class FakeMariaDBConnection:
                 "reservation_state_json": "{}",
             }
         }
+        self.logs: list[dict] = []
+        self._next_task_id = 4
         self.statements: list[tuple[str, tuple]] = []
         self.execute = Mock(side_effect=self._execute)
         self.begin = Mock()
@@ -78,6 +107,9 @@ class FakeMariaDBConnection:
         self.rollback = Mock()
         self.close = Mock()
         self.ping = Mock()
+
+    def cursor(self, dictionary=True):
+        return FakeConnectionCursor(self)
 
     def _execute(self, query, params=()):
         normalized = " ".join(str(query).split())
@@ -112,6 +144,66 @@ class FakeMariaDBConnection:
                     "priority": selected["priority"],
                 }
             return FakeCursor([task] if task else [], 1 if task else 0)
+        if normalized.startswith("SELECT id, root_task_id, task_type, status, assigned_service, priority, result_summary_md, created_at FROM tasks ORDER BY created_at DESC, id DESC LIMIT 50"):
+            rows = []
+            for task in sorted(self.tasks.values(), key=lambda item: item["id"], reverse=True):
+                rows.append(
+                    {
+                        "id": task["id"],
+                        "root_task_id": task["root_task_id"],
+                        "task_type": task.get("task_type", "documentation"),
+                        "status": task["status"],
+                        "assigned_service": task["assigned_service"],
+                        "priority": task["priority"],
+                        "result_summary_md": task.get("result_summary_md"),
+                        "created_at": task.get("created_at", f"t{task['id']}"),
+                    }
+                )
+            return FakeCursor(rows, len(rows))
+        if normalized.startswith("SELECT id, root_task_id, task_type, phase, status, requested_by_role, assigned_role, assigned_service, priority, payload_json, result_summary_md, lease_owner, lease_expires_at, started_at, finished_at, created_at FROM tasks WHERE id = %s"):
+            selected = self.tasks.get(params[0])
+            if selected is None:
+                return FakeCursor([], 0)
+            return FakeCursor(
+                [
+                    {
+                        "id": selected["id"],
+                        "root_task_id": selected["root_task_id"],
+                        "task_type": selected.get("task_type", "documentation"),
+                        "phase": selected.get("phase", 4),
+                        "status": selected["status"],
+                        "requested_by_role": selected.get("requested_by_role", "dashboard"),
+                        "assigned_role": selected.get("assigned_role", "brain"),
+                        "assigned_service": selected["assigned_service"],
+                        "priority": selected["priority"],
+                        "payload_json": selected.get("payload_json"),
+                        "result_summary_md": selected.get("result_summary_md"),
+                        "lease_owner": selected["lease_owner"],
+                        "lease_expires_at": selected["lease_expires_at"],
+                        "started_at": selected.get("started_at"),
+                        "finished_at": selected.get("finished_at"),
+                        "created_at": selected.get("created_at", f"t{selected['id']}"),
+                    }
+                ],
+                1,
+            )
+        if normalized.startswith("SELECT task_id, root_task_id, service, event_type, message, created_at FROM logs WHERE task_id = %s ORDER BY id ASC"):
+            task_id = params[0]
+            rows = []
+            for index, log in enumerate(self.logs, start=1):
+                if log["task_id"] != task_id:
+                    continue
+                rows.append(
+                    {
+                        "task_id": log["task_id"],
+                        "root_task_id": log["root_task_id"],
+                        "service": log["service"],
+                        "event_type": log["event_type"],
+                        "message": log["message"],
+                        "created_at": log.get("created_at", f"l{index}"),
+                    }
+                )
+            return FakeCursor(rows, len(rows))
         if "WHERE assigned_service = %s AND status IN ('leased', 'running')" in normalized:
             service_name = params[0]
             rows = [
@@ -163,6 +255,50 @@ class FakeMariaDBConnection:
             task["lease_expires_at"] = None
             task["started_at"] = None
             return FakeCursor([], 1)
+        if normalized.startswith("INSERT INTO tasks (root_task_id, task_type, phase, status, requested_by_role, assigned_role, assigned_service, priority, payload_json, retry_count, max_retry, approval_required) VALUES"):
+            (
+                root_task_id,
+                task_type,
+                phase,
+                status,
+                requested_by_role,
+                assigned_role,
+                assigned_service,
+                priority,
+                payload_json,
+                retry_count,
+                max_retry,
+                approval_required,
+            ) = params
+            task_id = self._next_task_id
+            self._next_task_id += 1
+            self.tasks[task_id] = {
+                "id": task_id,
+                "root_task_id": root_task_id,
+                "status": status,
+                "lease_owner": None,
+                "lease_expires_at": None,
+                "assigned_service": assigned_service,
+                "priority": priority,
+                "started_at": None,
+                "finished_at": None,
+                "task_type": task_type,
+                "phase": phase,
+                "requested_by_role": requested_by_role,
+                "assigned_role": assigned_role,
+                "payload_json": json.loads(payload_json),
+                "result_summary_md": None,
+                "retry_count": retry_count,
+                "max_retry": max_retry,
+                "approval_required": approval_required,
+                "created_at": f"t{task_id}",
+            }
+            return FakeCursor([], 1, lastrowid=task_id)
+        if normalized.startswith("UPDATE tasks SET root_task_id = %s WHERE id = %s"):
+            root_task_id, task_id = params
+            task = self.tasks[task_id]
+            task["root_task_id"] = root_task_id
+            return FakeCursor([], 1)
         if normalized == "UPDATE tasks SET status = 'queued' WHERE status = 'blocked'":
             task_ids = [task_id for task_id, task in self.tasks.items() if task["status"] == "blocked"]
             for task_id in task_ids:
@@ -173,6 +309,29 @@ class FakeMariaDBConnection:
             self.port_allocator[service_name]["reservation_state_json"] = reservation_state
             return FakeCursor([], 1)
         if normalized.startswith("INSERT INTO logs"):
+            if len(params) == 9:
+                task_id, root_task_id, service, _component, _level, event_type, message, _details_json, _trace_id = params
+                self.logs.append(
+                    {
+                        "task_id": task_id,
+                        "root_task_id": root_task_id,
+                        "service": service,
+                        "event_type": event_type,
+                        "message": message,
+                    }
+                )
+            elif len(params) == 4:
+                event_type, message, _details_json, trace_id = params
+                self.logs.append(
+                    {
+                        "task_id": None,
+                        "root_task_id": None,
+                        "service": "librarian",
+                        "event_type": event_type,
+                        "message": message,
+                        "trace_id": trace_id,
+                    }
+                )
             return FakeCursor([], 1)
         return FakeCursor([], 1)
 
@@ -231,8 +390,8 @@ def sandbox(tmp_path):
 
 
 @pytest.fixture
-def dashboard():
-    return SecureDashboard()
+def dashboard(db_connection_mock, secret_scanner):
+    return SecureDashboard(db_connection=db_connection_mock, secret_scanner=secret_scanner)
 
 
 @pytest.fixture

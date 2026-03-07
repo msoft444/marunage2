@@ -71,6 +71,12 @@ body {
   gap: 24px;
 }
 
+.workspace-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 420px) minmax(0, 1fr);
+  gap: 24px;
+}
+
 .hero-card,
 .panel {
   background: var(--panel);
@@ -124,6 +130,128 @@ ul {
   padding-left: 20px;
 }
 
+.section-head,
+.detail-header,
+.form-actions,
+.task-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.task-form {
+  display: grid;
+  gap: 16px;
+}
+
+.task-form label,
+.detail-meta div {
+  display: grid;
+  gap: 8px;
+}
+
+.task-form input,
+.task-form textarea,
+#task-submit,
+.detail-link,
+.ghost-link {
+  border-radius: 14px;
+  border: 1px solid var(--line);
+}
+
+.task-form input,
+.task-form textarea {
+  width: 100%;
+  padding: 14px 16px;
+  background: rgba(255, 255, 255, 0.9);
+  color: var(--ink);
+  font: inherit;
+}
+
+#task-submit,
+.detail-link,
+.ghost-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px 16px;
+  background: var(--accent);
+  color: white;
+  text-decoration: none;
+}
+
+.ghost-link {
+  background: rgba(255, 255, 255, 0.8);
+  color: var(--accent-strong);
+}
+
+.badge {
+  padding: 8px 12px;
+  border-radius: 999px;
+  background: rgba(19, 78, 74, 0.1);
+  color: var(--accent-strong);
+  text-transform: uppercase;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+}
+
+.helper-text,
+.task-meta,
+.task-empty,
+.detail-meta dt {
+  color: var(--muted);
+}
+
+.task-list,
+.log-list {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: 12px;
+}
+
+.task-item,
+.log-list li,
+.result-card,
+.detail-meta {
+  padding: 16px;
+  border-radius: 16px;
+  border: 1px solid rgba(214, 201, 178, 0.9);
+  background: rgba(255, 255, 255, 0.7);
+}
+
+.task-title {
+  margin: 0 0 6px;
+  font-weight: 700;
+}
+
+.detail-meta {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.detail-meta dt,
+.detail-meta dd,
+.result-card p {
+  margin: 0;
+}
+
+.detail-block {
+  display: grid;
+  gap: 12px;
+}
+
+.task-status-blocked {
+  border-color: #d97706;
+}
+
+.task-status-queued {
+  border-color: var(--accent);
+}
+
 @media (max-width: 900px) {
   #marunage-app {
     grid-template-columns: 1fr;
@@ -135,7 +263,9 @@ ul {
   }
 
   .hero-stats,
-  .panel-grid {
+  .panel-grid,
+  .workspace-grid,
+  .detail-meta {
     grid-template-columns: 1fr;
   }
 }
