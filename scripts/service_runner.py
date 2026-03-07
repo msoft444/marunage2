@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import os
 import signal
@@ -9,6 +8,15 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+from backend import WorkerEngine
+from backend.database import LeaseConflictError
+from security import SecureDashboard
 
 
 LOGGER = logging.getLogger("marunage2.service")
@@ -68,17 +76,30 @@ def ping_database() -> None:
         connection.close()
 
 
+def open_database_connection():
+    import mariadb
+
+    return mariadb.connect(
+        host=os.environ["DB_HOST"],
+        port=int(os.environ["DB_PORT"]),
+        user=os.environ["DB_USER"],
+        password=os.environ["DB_PASSWORD"],
+        database=os.environ["DB_NAME"],
+        autocommit=False,
+    )
+
+
 class DashboardHandler(BaseHTTPRequestHandler):
+    dashboard = SecureDashboard()
+
     def do_GET(self) -> None:  # noqa: N802
-        payload = {
-            "service": "dashboard",
-            "status": "ok",
-            "path": self.path,
-        }
-        body = json.dumps(payload).encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
+        response = self.dashboard.serve_path(self.path)
+        body = response["body"].encode("utf-8")
+        self.send_response(response["status"])
+        self.send_header("Content-Type", response["content_type"])
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 
@@ -103,9 +124,16 @@ def run_dashboard() -> int:
 
 def run_worker(service_name: str, extra_required: list[str] | None = None) -> int:
     validate_runtime_env(extra_required)
-    ping_database()
+    connection = open_database_connection()
     interval = int(os.getenv("SERVICE_LOOP_INTERVAL_SEC", "30"))
     stop_event = threading.Event()
+    worker_name = f"{service_name}-{os.getpid()}"
+    engine = WorkerEngine(
+        connection,
+        service_name=service_name,
+        worker_name=worker_name,
+        connection_factory=open_database_connection,
+    )
 
     def _stop(_signum, _frame) -> None:
         LOGGER.info("received shutdown signal for %s", service_name)
@@ -115,9 +143,23 @@ def run_worker(service_name: str, extra_required: list[str] | None = None) -> in
     signal.signal(signal.SIGINT, _stop)
 
     LOGGER.info("%s service started", service_name)
-    while not stop_event.wait(interval):
-        ping_database()
-        LOGGER.info("%s heartbeat ok", service_name)
+    try:
+        while not stop_event.is_set():
+            try:
+                engine.ensure_connection()
+                engine.recover_expired_tasks()
+                processed = engine.run_once()
+                LOGGER.info("%s heartbeat ok", service_name)
+                if processed:
+                    LOGGER.info("%s processed one queued task", service_name)
+            except LeaseConflictError:
+                LOGGER.info("%s Task already leased by another worker", service_name)
+            except Exception:
+                LOGGER.exception("%s worker cycle failed", service_name)
+            if stop_event.wait(interval):
+                break
+    finally:
+        engine.connection.close()
     LOGGER.info("%s service stopped", service_name)
     return 0
 

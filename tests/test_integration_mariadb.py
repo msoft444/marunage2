@@ -68,6 +68,11 @@ def test_mariadb_accessor_leases_once(mariadb_connection):
         owner = accessor.atomic_lease(1001, "worker-a")
 
     assert owner == "worker-a"
+    cursor = mariadb_connection.cursor(dictionary=True)
+    cursor.execute("SELECT lease_expires_at FROM tasks WHERE id = %s", (1001,))
+    row = cursor.fetchone()
+    cursor.close()
+    assert row["lease_expires_at"] is not None
 
     with pytest.raises(LeaseConflictError):
         with accessor.transaction():

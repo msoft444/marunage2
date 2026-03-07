@@ -1,0 +1,141 @@
+:root {
+  color-scheme: light;
+  --bg: #f3efe6;
+  --panel: #fffaf2;
+  --ink: #1e2a2f;
+  --muted: #5f6a6f;
+  --line: #d6c9b2;
+  --accent: #0f766e;
+  --accent-strong: #134e4a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Hiragino Sans", "Yu Gothic", sans-serif;
+  color: var(--ink);
+  background:
+    radial-gradient(circle at top left, rgba(15, 118, 110, 0.18), transparent 30%),
+    linear-gradient(180deg, #f8f4ea 0%, var(--bg) 100%);
+}
+
+#marunage-app {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 280px 1fr;
+}
+
+.shell-sidebar {
+  padding: 32px 24px;
+  border-right: 1px solid var(--line);
+  background: rgba(255, 250, 242, 0.86);
+  backdrop-filter: blur(10px);
+}
+
+.eyebrow,
+.kicker {
+  margin: 0 0 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  font-size: 12px;
+  color: var(--accent-strong);
+}
+
+.subtitle {
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+#sidebar-nav {
+  display: grid;
+  gap: 10px;
+  margin-top: 32px;
+}
+
+#sidebar-nav a {
+  display: block;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: var(--ink);
+  text-decoration: none;
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.shell-main {
+  padding: 32px;
+  display: grid;
+  gap: 24px;
+}
+
+.hero-card,
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  padding: 24px;
+  box-shadow: 0 16px 40px rgba(30, 42, 47, 0.06);
+}
+
+.hero-stats,
+.panel-grid {
+  display: grid;
+  gap: 16px;
+}
+
+.hero-stats {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 24px;
+}
+
+.hero-stats article,
+.panel-grid .panel {
+  background: rgba(255, 255, 255, 0.7);
+  border-radius: 16px;
+  padding: 18px;
+  border: 1px solid rgba(214, 201, 178, 0.9);
+}
+
+.hero-stats span {
+  display: block;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+
+.hero-stats strong {
+  font-size: 28px;
+}
+
+pre {
+  overflow: auto;
+  margin: 0;
+  padding: 16px;
+  border-radius: 14px;
+  background: #182025;
+  color: #d9f3ef;
+}
+
+ol,
+ul {
+  margin: 0;
+  padding-left: 20px;
+}
+
+@media (max-width: 900px) {
+  #marunage-app {
+    grid-template-columns: 1fr;
+  }
+
+  .shell-sidebar {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .hero-stats,
+  .panel-grid {
+    grid-template-columns: 1fr;
+  }
+}

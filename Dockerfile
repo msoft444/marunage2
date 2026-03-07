@@ -52,9 +52,10 @@ COPY --chown=marunage:marunage src ./src
 COPY --chown=marunage:marunage tests ./tests
 COPY --chown=marunage:marunage scripts ./scripts
 COPY --chown=marunage:marunage init.sql ./init.sql
+RUN chmod 755 /app/scripts/entrypoint.sh
 
 USER marunage
 
-ENTRYPOINT ["/usr/bin/tini", "--"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/app/scripts/entrypoint.sh"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["python", "scripts/healthcheck.py"]
 CMD ["python", "scripts/service_runner.py", "brain"]

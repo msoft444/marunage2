@@ -21,6 +21,21 @@ class TaskRow:
     lease_expires_at: str | None
 
 
+@dataclass(frozen=True)
+class QueueTaskRow:
+    id: int
+    root_task_id: int
+    status: str
+    assigned_service: str
+    priority: int
+
+
+@dataclass(frozen=True)
+class RecoverableTaskRow:
+    id: int
+    root_task_id: int
+
+
 class MariaDBAccessor:
     def __init__(self, connection: Any):
         self.connection = connection
@@ -81,15 +96,67 @@ class MariaDBAccessor:
         cursor = self._execute(query, (new_status, task_id, current_status))
         return bool(cursor.rowcount)
 
+    def select_next_queued_task(self, service_name: str) -> QueueTaskRow | None:
+        query = (
+            "SELECT id, root_task_id, status, assigned_service, priority "
+            "FROM tasks WHERE assigned_service = %s AND status = 'queued' "
+            "ORDER BY priority DESC, created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED"
+        )
+        cursor = self._execute(query, (service_name,))
+        row = self._fetchone_dict(cursor)
+        if row is None:
+            return None
+        return QueueTaskRow(**row)
+
+    def select_expired_tasks_for_requeue(self, service_name: str) -> list[RecoverableTaskRow]:
+        query = (
+            "SELECT id, root_task_id FROM tasks "
+            "WHERE assigned_service = %s "
+            "AND status IN ('leased', 'running') "
+            "AND lease_expires_at IS NOT NULL "
+            "AND lease_expires_at < CURRENT_TIMESTAMP "
+            "ORDER BY created_at ASC FOR UPDATE SKIP LOCKED"
+        )
+        cursor = self._execute(query, (service_name,))
+        return [RecoverableTaskRow(**row) for row in self._fetchall_dicts(cursor)]
+
+    def mark_task_running(self, task_id: int, lease_owner: str) -> bool:
+        query = (
+            "UPDATE tasks SET status = 'running', started_at = CURRENT_TIMESTAMP "
+            "WHERE id = %s AND status = 'leased' AND lease_owner = %s"
+        )
+        cursor = self._execute(query, (task_id, lease_owner))
+        return bool(cursor.rowcount)
+
+    def insert_log(self, task_id: int, root_task_id: int, service: str, event_type: str, message: str, trace_id: str) -> bool:
+        query = (
+            "INSERT INTO logs (task_id, root_task_id, service, component, level, event_type, message, details_json, trace_id) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
+        )
+        cursor = self._execute(
+            query,
+            (task_id, root_task_id, service, "worker_engine", "INFO", event_type, message, None, trace_id),
+        )
+        return bool(cursor.rowcount)
+
     def atomic_lease(self, task_id: int, lease_owner: str) -> str:
         query = (
-            "UPDATE tasks SET status = 'leased', lease_owner = %s "
+            "UPDATE tasks SET status = 'leased', lease_owner = %s, "
+            "lease_expires_at = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL 1 HOUR) "
             "WHERE id = %s AND status = 'queued'"
         )
         cursor = self._execute(query, (lease_owner, task_id))
         if cursor.rowcount == 0:
             raise LeaseConflictError(f"task {task_id} is already leased")
         return lease_owner
+
+    def requeue_expired_task(self, task_id: int) -> bool:
+        query = (
+            "UPDATE tasks SET status = 'queued', lease_owner = NULL, lease_expires_at = NULL, started_at = NULL "
+            "WHERE id = %s AND status IN ('leased', 'running')"
+        )
+        cursor = self._execute(query, (task_id,))
+        return bool(cursor.rowcount)
 
     def requeue_blocked_tasks(self) -> list[int]:
         query = "UPDATE tasks SET status = 'queued' WHERE status = 'blocked'"
@@ -130,3 +197,22 @@ class MariaDBAccessor:
             raise TaskConsistencyError("cursor did not expose column metadata")
         columns = [column[0] for column in description]
         return dict(zip(columns, row, strict=True))
+
+    def _fetchall_dicts(self, cursor) -> list[dict[str, Any]]:
+        fetchall = getattr(cursor, "fetchall", None)
+        if callable(fetchall):
+            rows = fetchall()
+        else:
+            first_row = self._fetchone_dict(cursor)
+            rows = [] if first_row is None else [first_row]
+
+        if not rows:
+            return []
+        if isinstance(rows[0], dict):
+            return list(rows)
+
+        description = getattr(cursor, "description", None)
+        if not description:
+            raise TaskConsistencyError("cursor did not expose column metadata")
+        columns = [column[0] for column in description]
+        return [dict(zip(columns, row, strict=True)) for row in rows]

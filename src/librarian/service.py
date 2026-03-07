@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import shutil
@@ -9,6 +8,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import gettempdir
+
+import portalocker
 
 
 @dataclass
@@ -152,9 +153,5 @@ class LibrarianService:
     def _wal_lock(self):
         lock_path = self.wal_path.with_suffix(self.wal_path.suffix + ".lock")
         lock_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(lock_path, "a+", encoding="utf-8") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        with portalocker.Lock(lock_path, mode="a+", flags=portalocker.LockFlags.EXCLUSIVE):
+            yield

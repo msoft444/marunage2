@@ -30,8 +30,8 @@ services:
       DB_HOST: mariadb
       DB_PORT: "3306"
       DB_NAME: marunage2
-      DB_USER: marunage
-      DB_PASSWORD: marunage-password
+      DB_USER: root
+      DB_PASSWORD: marunage-root-password
       HEALTHCHECK_TIMEOUT_SEC: "5"
       MARIADB_INTEGRATION: "1"
       REQUIRED_ENV_VARS: "DB_HOST,DB_PORT,DB_NAME,DB_USER,DB_PASSWORD"

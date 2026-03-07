@@ -1,6 +1,22 @@
+import json
+import multiprocessing
 from collections import namedtuple
 from pathlib import Path
 import shutil
+
+from librarian import LibrarianService
+
+
+def _append_wal_entries_in_child(wal_path: str, process_index: int, entry_count: int) -> None:
+    librarian = LibrarianService(db_connection=object(), docker_client=object(), wal_path=Path(wal_path))
+    for entry_index in range(entry_count):
+        librarian._append_wal(
+            {
+                "wal_id": f"proc-{process_index}-entry-{entry_index}",
+                "event": "db_outage",
+                "action": "buffer",
+            }
+        )
 
 
 def test_EX_01_mariadb_outage_uses_wal(librarian, db_connection_mock):
@@ -73,3 +89,22 @@ def test_LB_06_wal_falls_back_to_memory_on_oserror(librarian, monkeypatch):
     monkeypatch.setattr(Path, "open", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("full")))
     librarian._append_wal({"event": "db_outage", "action": "buffer"})
     assert len(librarian.memory_wal_buffer) == 1
+
+
+def test_LB_07_wal_append_is_safe_across_processes(tmp_path):
+    wal_path = tmp_path / "concurrent-librarian.wal"
+    ctx = multiprocessing.get_context("spawn")
+    processes = [
+        ctx.Process(target=_append_wal_entries_in_child, args=(str(wal_path), process_index, 25))
+        for process_index in range(4)
+    ]
+
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=15)
+        assert process.exitcode == 0
+
+    entries = [json.loads(line) for line in wal_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(entries) == 100
+    assert len({entry["wal_id"] for entry in entries}) == 100

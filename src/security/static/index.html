@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Maru-nage v2 Dashboard</title>
+    <link rel="stylesheet" href="/static/css/app.css" />
+  </head>
+  <body>
+    <div id="marunage-app">
+      <aside class="shell-sidebar">
+        <div class="brand-block">
+          <p class="eyebrow">Operations Console</p>
+          <h1>丸投げシステム v2</h1>
+          <p class="subtitle">Brain / Librarian / Guardian / Dashboard の運用管制画面</p>
+        </div>
+        <nav id="sidebar-nav" aria-label="Primary">
+          <a href="#overview">Overview</a>
+          <a href="#services">Services</a>
+          <a href="#timeline">Timeline</a>
+          <a href="#approvals">Approvals</a>
+        </nav>
+      </aside>
+      <main class="shell-main">
+        <section id="overview" class="hero-card">
+          <p class="kicker">Control Tower</p>
+          <h2>進行中タスク、障害、承認待ちを 1 画面で把握</h2>
+          <p>
+            Dashboard は MariaDB を通信ハブとして、各サービスの状態、失敗タスク、
+            Librarian 経由のナレッジ同期状況を監視します。
+          </p>
+          <div class="hero-stats">
+            <article>
+              <span>稼働サービス</span>
+              <strong id="service-count">4 / 4</strong>
+            </article>
+            <article>
+              <span>未解決アラート</span>
+              <strong id="alert-count">0</strong>
+            </article>
+            <article>
+              <span>承認待ち</span>
+              <strong id="approval-count">1</strong>
+            </article>
+          </div>
+        </section>
+        <section id="services" class="panel-grid">
+          <article class="panel">
+            <h3>Service Health</h3>
+            <ul id="service-health-list">
+              <li>Brain: queued tasks draining normally</li>
+              <li>Librarian: WAL replay idle</li>
+              <li>Guardian: restart policy armed</li>
+              <li>Dashboard: static UI route active</li>
+            </ul>
+          </article>
+          <article class="panel">
+            <h3>Latest API Check</h3>
+            <pre id="api-health-output">Loading /api/v1/health ...</pre>
+          </article>
+        </section>
+        <section id="timeline" class="panel">
+          <h3>Recent Timeline</h3>
+          <ol id="timeline-feed">
+            <li>Knowledge sync completed for release checklist PDF.</li>
+            <li>Guardian classified previous restart failure as transient.</li>
+            <li>Dashboard UI served from static assets.</li>
+          </ol>
+        </section>
+        <section id="approvals" class="panel">
+          <h3>Approval Queue</h3>
+          <p>現在は promote_release が 1 件待機しています。承認操作は API プレフィックス配下から行います。</p>
+        </section>
+      </main>
+    </div>
+    <script src="/static/js/app.js"></script>
+  </body>
+</html>

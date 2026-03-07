@@ -25,13 +25,43 @@ class FakeCursor:
     def fetchone(self):
         return self.rows[0] if self.rows else None
 
+    def fetchall(self):
+        return list(self.rows)
+
 
 class FakeMariaDBConnection:
     def __init__(self):
         self.tasks = {
-            1: {"id": 1, "status": "queued", "lease_owner": None, "lease_expires_at": None},
-            2: {"id": 2, "status": "blocked", "lease_owner": None, "lease_expires_at": None},
-            3: {"id": 3, "status": "blocked", "lease_owner": None, "lease_expires_at": None},
+            1: {
+                "id": 1,
+                "root_task_id": 1,
+                "status": "queued",
+                "lease_owner": None,
+                "lease_expires_at": None,
+                "assigned_service": "brain",
+                "priority": 0,
+                "started_at": None,
+            },
+            2: {
+                "id": 2,
+                "root_task_id": 2,
+                "status": "blocked",
+                "lease_owner": None,
+                "lease_expires_at": None,
+                "assigned_service": "brain",
+                "priority": 0,
+                "started_at": None,
+            },
+            3: {
+                "id": 3,
+                "root_task_id": 3,
+                "status": "blocked",
+                "lease_owner": None,
+                "lease_expires_at": None,
+                "assigned_service": "brain",
+                "priority": 0,
+                "started_at": None,
+            },
         }
         self.port_allocator = {
             "dashboard": {
@@ -46,6 +76,8 @@ class FakeMariaDBConnection:
         self.begin = Mock()
         self.commit = Mock()
         self.rollback = Mock()
+        self.close = Mock()
+        self.ping = Mock()
 
     def _execute(self, query, params=()):
         normalized = " ".join(str(query).split())
@@ -53,18 +85,58 @@ class FakeMariaDBConnection:
         if normalized == "SELECT 1":
             return FakeCursor([{"value": 1}], 1)
         if "FROM tasks WHERE id = %s FOR UPDATE" in normalized:
-            task = self.tasks.get(params[0])
+            task = None
+            selected = self.tasks.get(params[0])
+            if selected is not None:
+                task = {
+                    "id": selected["id"],
+                    "status": selected["status"],
+                    "lease_owner": selected["lease_owner"],
+                    "lease_expires_at": selected["lease_expires_at"],
+                }
             return FakeCursor([task] if task else [], 1 if task else 0)
+        if "FROM tasks WHERE assigned_service = %s AND status = 'queued'" in normalized:
+            service_name = params[0]
+            candidates = [
+                task for task in self.tasks.values() if task["assigned_service"] == service_name and task["status"] == "queued"
+            ]
+            candidates.sort(key=lambda task: (-task["priority"], task["id"]))
+            task = None
+            if candidates:
+                selected = candidates[0]
+                task = {
+                    "id": selected["id"],
+                    "root_task_id": selected["root_task_id"],
+                    "status": selected["status"],
+                    "assigned_service": selected["assigned_service"],
+                    "priority": selected["priority"],
+                }
+            return FakeCursor([task] if task else [], 1 if task else 0)
+        if "WHERE assigned_service = %s AND status IN ('leased', 'running')" in normalized:
+            service_name = params[0]
+            rows = [
+                {
+                    "id": task["id"],
+                    "root_task_id": task["root_task_id"],
+                }
+                for task in self.tasks.values()
+                if task["assigned_service"] == service_name
+                and task["status"] in {"leased", "running"}
+                and task["lease_expires_at"] == "expired"
+            ]
+            rows.sort(key=lambda task: task["id"])
+            return FakeCursor(rows, len(rows))
         if "FROM port_allocator WHERE service_name = %s FOR UPDATE" in normalized:
             row = self.port_allocator.get(params[0])
             return FakeCursor([row] if row else [], 1 if row else 0)
-        if normalized.startswith("UPDATE tasks SET status = 'leased', lease_owner = %s"):
+        if normalized.startswith("UPDATE tasks SET status = 'leased', lease_owner = %s, lease_expires_at = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL 1 HOUR)"):
             lease_owner, task_id = params
             task = self.tasks[task_id]
             if task["status"] != "queued":
                 return FakeCursor([], 0)
             task["status"] = "leased"
             task["lease_owner"] = lease_owner
+            task["lease_expires_at"] = "leased-until-later"
             return FakeCursor([], 1)
         if normalized.startswith("UPDATE tasks SET status = %s WHERE id = %s AND status = %s"):
             new_status, task_id, current_status = params
@@ -72,6 +144,24 @@ class FakeMariaDBConnection:
             if task["status"] != current_status:
                 return FakeCursor([], 0)
             task["status"] = new_status
+            return FakeCursor([], 1)
+        if normalized.startswith("UPDATE tasks SET status = 'running', started_at = CURRENT_TIMESTAMP WHERE id = %s AND status = 'leased' AND lease_owner = %s"):
+            task_id, lease_owner = params
+            task = self.tasks[task_id]
+            if task["status"] != "leased" or task["lease_owner"] != lease_owner:
+                return FakeCursor([], 0)
+            task["status"] = "running"
+            task["started_at"] = "now"
+            return FakeCursor([], 1)
+        if normalized.startswith("UPDATE tasks SET status = 'queued', lease_owner = NULL, lease_expires_at = NULL, started_at = NULL WHERE id = %s AND status IN ('leased', 'running')"):
+            task_id = params[0]
+            task = self.tasks[task_id]
+            if task["status"] not in {"leased", "running"}:
+                return FakeCursor([], 0)
+            task["status"] = "queued"
+            task["lease_owner"] = None
+            task["lease_expires_at"] = None
+            task["started_at"] = None
             return FakeCursor([], 1)
         if normalized == "UPDATE tasks SET status = 'queued' WHERE status = 'blocked'":
             task_ids = [task_id for task_id, task in self.tasks.items() if task["status"] == "blocked"]

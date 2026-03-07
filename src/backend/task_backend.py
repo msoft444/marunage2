@@ -65,6 +65,52 @@ class MariaDBTaskBackend:
                 return False
             return self.db.update_task_status(task_id, current, new)
 
+    def process_next_queued_task(self, service_name: str, worker_name: str) -> bool:
+        with self.db.transaction():
+            task = self.db.select_next_queued_task(service_name)
+            if task is None:
+                return False
+
+            self.db.atomic_lease(task.id, worker_name)
+
+            if not TaskStateMachine.can_transition("leased", "running"):
+                raise TaskConsistencyError("cannot transition leased task to running")
+
+            started = self.db.mark_task_running(task.id, worker_name)
+            if not started:
+                raise TaskConsistencyError(f"task {task.id} could not be marked running")
+
+            self.db.insert_log(
+                task.id,
+                task.root_task_id,
+                service_name,
+                "task_started",
+                "Task processing started",
+                worker_name,
+            )
+            return True
+
+    def recover_expired_tasks(self, service_name: str, worker_name: str) -> list[int]:
+        with self.db.transaction():
+            expired_tasks = self.db.select_expired_tasks_for_requeue(service_name)
+            if not expired_tasks:
+                return []
+
+            recovered_task_ids: list[int] = []
+            for task in expired_tasks:
+                if not self.db.requeue_expired_task(task.id):
+                    raise TaskConsistencyError(f"task {task.id} could not be requeued after lease expiration")
+                self.db.insert_log(
+                    task.id,
+                    task.root_task_id,
+                    service_name,
+                    "task_recovered",
+                    "Task requeued after lease expiration",
+                    worker_name,
+                )
+                recovered_task_ids.append(task.id)
+            return recovered_task_ids
+
     def lease_twice(self) -> list[str]:
         with self.db.transaction():
             first = self.db.atomic_lease(1, "worker-a")
