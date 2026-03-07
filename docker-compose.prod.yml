@@ -30,16 +30,14 @@ services:
       - ${RUNTIME_ENV_FILE:-.env.runtime}
     environment:
       DB_PASSWORD_FILE: /run/secrets/db_password
-      GITHUB_TOKEN_FILE: /run/secrets/github_token
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
     depends_on:
       mariadb:
         condition: service_healthy
     volumes:
-      - ${HOST_COPILOT_CONFIG_DIR:-/tmp/copilot-config}:${COPILOT_CONFIG_DIR:-/run/copilot}:ro
       - ${DOCKER_SOCK:-/var/run/docker.sock}:${DOCKER_SOCK:-/var/run/docker.sock}
     secrets:
       - db_password
-      - github_token
     command: ["python", "scripts/service_runner.py", "brain"]
 
   librarian:
@@ -52,6 +50,7 @@ services:
       - ${RUNTIME_ENV_FILE:-.env.runtime}
     environment:
       DB_PASSWORD_FILE: /run/secrets/db_password
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
     depends_on:
       mariadb:
         condition: service_healthy
@@ -71,6 +70,7 @@ services:
       - ${RUNTIME_ENV_FILE:-.env.runtime}
     environment:
       DB_PASSWORD_FILE: /run/secrets/db_password
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
     depends_on:
       mariadb:
         condition: service_healthy
@@ -90,16 +90,14 @@ services:
       - ${RUNTIME_ENV_FILE:-.env.runtime}
     environment:
       DB_PASSWORD_FILE: /run/secrets/db_password
-      GITHUB_TOKEN_FILE: /run/secrets/github_token
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
     depends_on:
       mariadb:
         condition: service_healthy
     volumes:
-      - ${HOST_COPILOT_CONFIG_DIR:-/tmp/copilot-config}:${COPILOT_CONFIG_DIR:-/run/copilot}:ro
       - ${DOCKER_SOCK:-/var/run/docker.sock}:${DOCKER_SOCK:-/var/run/docker.sock}
     secrets:
       - db_password
-      - github_token
     command: ["python", "scripts/service_runner.py", "guardian"]
 
 secrets:
@@ -107,8 +105,6 @@ secrets:
     file: ./secrets/db_password
   db_root_password:
     file: ./secrets/db_root_password
-  github_token:
-    file: ./secrets/github_token
 
 volumes:
   mariadb-data:

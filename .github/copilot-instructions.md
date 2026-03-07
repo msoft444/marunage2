@@ -29,6 +29,8 @@ When the user types these labels, follow the instructions:
 
 ## 🛠️ Output Requirement
 - After any task, always update `.tdd_protocol.md` (Status, Log, etc.).
+- When updating `.tdd_protocol.md`, explicitly maintain `Status` according to the current execution phase: use `IN_PROGRESS` while docs/RED/GREEN/REFACTOR work is actively ongoing, switch to `PENDING_AUDIT` once implementation and verification are complete and the change is waiting for audit, set `APPROVED` when the audit passes, and set `REJECTED` when the audit finds unresolved issues.
+- When `Status` changes, update `.tdd_protocol.md` in the same task where the triggering event occurred and record the reason in `Activity Log` so the state transition is auditable from the file alone.
 - If requirements/basic design/detailed design were clarified during the task, reflect those changes in the appropriate `docs/` files before or together with code/test changes, and keep `.tdd_protocol.md` limited to the active objective, execution tasks, status, and concise activity log.
 - For `bd` and `dt`, restrict edits to `docs/` files plus the minimum `.tdd_protocol.md` synchronization needed to record state.
 - Provide the full updated content of `.tdd_protocol.md` in a code block at the end of your response.

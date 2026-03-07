@@ -31,8 +31,6 @@ append_missing_var() {
 missing_vars=()
 
 load_secret_var DB_PASSWORD
-load_secret_var GITHUB_TOKEN
-load_secret_var COPILOT_API_KEY
 
 IFS=',' read -r -a required_env_vars <<< "${REQUIRED_ENV_VARS:-DB_HOST,DB_PORT,DB_NAME,DB_USER,DB_PASSWORD}"
 for var_name in "${required_env_vars[@]}"; do
@@ -42,7 +40,7 @@ for var_name in "${required_env_vars[@]}"; do
 done
 
 service_name=""
-if [[ $# -ge 3 && "$1" == "python" && "$2" == "scripts/service_runner.py" ]]; then
+if [[ $# -ge 3 && "$(basename "$1")" == python* && "$2" == "scripts/service_runner.py" ]]; then
   service_name="$3"
 fi
 
@@ -50,16 +48,16 @@ case "$service_name" in
   brain)
     append_missing_var TARGET_REPO
     append_missing_var TARGET_REF
-    append_missing_var COPILOT_CONFIG_DIR
-    if [[ -z "${GITHUB_TOKEN:-}" && -z "${COPILOT_API_KEY:-}" ]]; then
-      missing_vars+=("GITHUB_TOKEN|COPILOT_API_KEY")
-    fi
+    append_missing_var GITHUB_TOKEN
     ;;
   guardian)
-    append_missing_var COPILOT_CONFIG_DIR
-    if [[ -z "${GITHUB_TOKEN:-}" && -z "${COPILOT_API_KEY:-}" ]]; then
-      missing_vars+=("GITHUB_TOKEN|COPILOT_API_KEY")
-    fi
+    append_missing_var GITHUB_TOKEN
+    ;;
+  dashboard)
+    append_missing_var GITHUB_TOKEN
+    ;;
+  librarian)
+    append_missing_var GITHUB_TOKEN
     ;;
 esac
 

@@ -32,11 +32,12 @@ def configure_logging() -> None:
 
 
 def load_file_backed_secrets() -> None:
-    for env_name, value in list(os.environ.items()):
-        if not env_name.endswith("_FILE") or not value:
+    for target_name in ("DB_PASSWORD",):
+        file_var_name = f"{target_name}_FILE"
+        secret_file = os.getenv(file_var_name)
+        if not secret_file:
             continue
-        target_name = env_name[:-5]
-        secret_path = Path(value)
+        secret_path = Path(secret_file)
         if not secret_path.exists():
             raise RuntimeError(f"secret file for {target_name} not found: {secret_path}")
         os.environ[target_name] = secret_path.read_text(encoding="utf-8").strip()
@@ -121,8 +122,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         LOGGER.info("dashboard request: " + format, *args)
 
 
-def run_dashboard() -> int:
-    validate_runtime_env()
+def run_dashboard(extra_required: list[str] | None = None) -> int:
+    validate_runtime_env(extra_required)
     ping_database()
     port = int(os.getenv("DASHBOARD_PORT", "18080"))
     DashboardHandler.dashboard = SecureDashboard(connection_factory=open_database_connection)
@@ -189,13 +190,13 @@ def main(argv: list[str]) -> int:
 
     service_name = argv[1]
     if service_name == "dashboard":
-        return run_dashboard()
+        return run_dashboard(["GITHUB_TOKEN"])
     if service_name == "brain":
-        return run_worker("brain", ["TARGET_REPO", "TARGET_REF", "COPILOT_CONFIG_DIR", "GITHUB_TOKEN"])
+        return run_worker("brain", ["TARGET_REPO", "TARGET_REF", "GITHUB_TOKEN"])
     if service_name == "guardian":
-        return run_worker("guardian", ["COPILOT_CONFIG_DIR", "GITHUB_TOKEN"])
+        return run_worker("guardian", ["GITHUB_TOKEN"])
     if service_name == "librarian":
-        return run_worker("librarian")
+        return run_worker("librarian", ["GITHUB_TOKEN"])
 
     print(f"unknown service: {service_name}", file=sys.stderr)
     return 2

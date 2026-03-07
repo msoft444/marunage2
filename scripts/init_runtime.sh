@@ -13,7 +13,7 @@ else
   echo "$ROOT_DIR/.env.runtime already exists"
 fi
 
-for secret_name in db_password db_root_password github_token; do
+for secret_name in db_password db_root_password; do
   secret_path="$ROOT_DIR/secrets/$secret_name"
   if [[ ! -f "$secret_path" ]]; then
     : > "$secret_path"
@@ -31,7 +31,7 @@ Next steps:
 1. Edit .env.runtime
 2. Fill secrets/db_password
 3. Fill secrets/db_root_password
-4. Fill secrets/github_token
-5. Ensure HOST_COPILOT_CONFIG_DIR points to your logged-in Copilot config directory
-6. Run: docker compose -f docker-compose.prod.yml --env-file .env.runtime up --build
+4. Run: gh auth login
+5. Confirm: gh auth token returns a non-empty token
+6. Run: python scripts/gh_token_compose.py up --build
 EOF
