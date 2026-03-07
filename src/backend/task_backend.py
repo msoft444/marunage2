@@ -1,18 +1,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable
 
 from .contracts import ContractValidationError, ModelContractCodec
 from .database import LeaseConflictError, MariaDBAccessor, TaskConsistencyError
+from .repository_workspace import RepositoryPreparationError, RepositoryWorkspaceManager
 from .state_machine import TaskStateMachine
 
 
 @dataclass
 class MariaDBTaskBackend:
     connection: object
+    git_command_runner: Callable[[list[str], Path], None] | None = None
+    workspace_root: str | Path = "/workspace"
 
     def __post_init__(self) -> None:
-        self.db = MariaDBAccessor(self.connection)
+        self.db = MariaDBAccessor(self.connection, workspace_root=self.workspace_root)
+        self.repository_workspace = RepositoryWorkspaceManager(self.git_command_runner)
 
     def resolve_orphan_promote(self, parent_status: str, promote_status: str) -> str:
         if promote_status == "succeeded":
@@ -88,6 +94,59 @@ class MariaDBTaskBackend:
                 "Task processing started",
                 worker_name,
             )
+            if task.target_repo and task.workspace_path and task.working_branch:
+                try:
+                    normalized_workspace_path = self.db.normalize_task_workspace_path(task.workspace_path)
+                except TaskConsistencyError as error:
+                    blocked = self.db.update_task_status(task.id, "running", "blocked")
+                    if not blocked:
+                        raise TaskConsistencyError(f"task {task.id} could not be blocked after invalid workspace path")
+                    self.db.insert_log(
+                        task.id,
+                        task.root_task_id,
+                        service_name,
+                        "invalid_workspace_path",
+                        f"Invalid workspace path: {error}",
+                        worker_name,
+                    )
+                    return True
+                try:
+                    prepared_paths = self.repository_workspace.prepare_repository(
+                        workspace_path=normalized_workspace_path,
+                        target_repo=task.target_repo,
+                        target_ref=task.target_ref or "main",
+                        working_branch=task.working_branch,
+                    )
+                except RepositoryPreparationError as error:
+                    blocked = self.db.update_task_status(task.id, "running", "blocked")
+                    if not blocked:
+                        raise TaskConsistencyError(f"task {task.id} could not be blocked after repository prepare failure")
+                    self.db.insert_log(
+                        task.id,
+                        task.root_task_id,
+                        service_name,
+                        "repository_prepare_failed",
+                        f"Repository preparation failed: {error}",
+                        worker_name,
+                    )
+                    return True
+
+                self.db.insert_log(
+                    task.id,
+                    task.root_task_id,
+                    service_name,
+                    "repository_prepared",
+                    f"Repository prepared in {prepared_paths['repo_path']}",
+                    worker_name,
+                )
+                self.db.insert_log(
+                    task.id,
+                    task.root_task_id,
+                    service_name,
+                    "phase_flow_initialized",
+                    "Phase 0-5 execution flow initialized",
+                    worker_name,
+                )
             return True
 
     def task_working_directory(self, task_id: int) -> str | None:

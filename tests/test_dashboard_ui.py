@@ -16,6 +16,18 @@ def test_dashboard_root_serves_marunage_ui_document():
     assert 'id="task-form"' in response["body"]
     assert 'id="task-detail-view"' in response["body"]
     assert 'id="task-repository-path"' in response["body"]
+    assert 'https://github.com/' in response["body"]
+
+
+def test_dashboard_task_form_exposes_single_repository_input():
+    dashboard = SecureDashboard()
+
+    response = dashboard.serve_path("/")
+
+    assert response["body"].count('id="task-repository-path"') == 1
+    assert response["body"].count('name="repository_path"') == 1
+    assert response["body"].count('<span>対象リポジトリ</span>') == 1
+    assert 'placeholder="例: /workspace/repo-a または https://github.com/org/repo"' in response["body"]
 
 
 def test_dashboard_index_html_prefers_static_ui_over_api_json():

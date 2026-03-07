@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
+
+from security.sandbox import WorkspaceSandbox
 
 
 class LeaseConflictError(RuntimeError):
@@ -29,6 +32,9 @@ class QueueTaskRow:
     assigned_service: str
     priority: int
     workspace_path: str | None = None
+    target_repo: str | None = None
+    target_ref: str | None = None
+    working_branch: str | None = None
 
 
 @dataclass(frozen=True)
@@ -38,9 +44,10 @@ class RecoverableTaskRow:
 
 
 class MariaDBAccessor:
-    def __init__(self, connection: Any):
+    def __init__(self, connection: Any, workspace_root: str | Path = "/workspace"):
         self.connection = connection
         self._transaction_depth = 0
+        self.workspace_sandbox = WorkspaceSandbox(str(workspace_root))
 
     @contextmanager
     def transaction(self):
@@ -99,7 +106,7 @@ class MariaDBAccessor:
 
     def select_next_queued_task(self, service_name: str) -> QueueTaskRow | None:
         query = (
-            "SELECT id, root_task_id, status, assigned_service, priority, workspace_path "
+            "SELECT id, root_task_id, status, assigned_service, priority, workspace_path, target_repo, target_ref, working_branch "
             "FROM tasks WHERE assigned_service = %s AND status = 'queued' "
             "ORDER BY priority DESC, created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED"
         )
@@ -110,12 +117,31 @@ class MariaDBAccessor:
         return QueueTaskRow(**row)
 
     def select_task_workspace_path(self, task_id: int) -> str | None:
-        query = "SELECT workspace_path FROM tasks WHERE id = %s"
+        query = "SELECT workspace_path, target_repo FROM tasks WHERE id = %s"
         cursor = self._execute(query, (task_id,))
         row = self._fetchone_dict(cursor)
         if row is None:
             raise TaskConsistencyError(f"task {task_id} does not exist")
-        return row.get("workspace_path")
+        return self.normalize_task_workspace_path(row.get("workspace_path"), row.get("target_repo"))
+
+    def normalize_task_workspace_path(self, workspace_path: str | None, target_repo: str | None = None) -> str | None:
+        if workspace_path is None:
+            return None
+        if not isinstance(workspace_path, str):
+            raise TaskConsistencyError("task workspace_path is invalid")
+        if not self.workspace_sandbox.validate_control_chars(workspace_path):
+            raise TaskConsistencyError("task workspace_path contains control characters")
+        try:
+            normalized_workspace = Path(workspace_path).resolve(strict=False)
+        except RuntimeError as error:
+            raise TaskConsistencyError("task workspace_path could not be normalized") from error
+        if not self.workspace_sandbox.validate_workspace_path(str(normalized_workspace)):
+            raise TaskConsistencyError("task workspace_path escapes workspace root")
+        if target_repo:
+            normalized_workspace = normalized_workspace / "repo"
+            if not self.workspace_sandbox.validate_workspace_path(str(normalized_workspace)):
+                raise TaskConsistencyError("task repository path escapes workspace root")
+        return str(normalized_workspace)
 
     def select_expired_tasks_for_requeue(self, service_name: str) -> list[RecoverableTaskRow]:
         query = (

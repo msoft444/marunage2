@@ -132,6 +132,48 @@ def test_dashboard_rejects_repository_path_outside_workspace_root(db_connection_
     assert response["json"] == {"error": "invalid_repository_path"}
 
 
+def test_dashboard_rejects_non_github_repository_url(db_connection_mock, tmp_path):
+    dashboard = SecureDashboard(
+        db_connection=db_connection_mock,
+        secret_scanner=SecretScanner(),
+        workspace_root=tmp_path,
+    )
+
+    response = dashboard.serve_request(
+        "POST",
+        "/api/v1/tasks",
+        body=json.dumps({
+            "task": "README作成",
+            "instruction": "整備",
+            "repository_path": "https://example.com/org/repo.git",
+        }),
+    )
+
+    assert response["status"] == 400
+    assert response["json"] == {"error": "invalid_repository_path"}
+
+
+def test_dashboard_rejects_github_repository_url_with_dot_segments(db_connection_mock, tmp_path):
+    dashboard = SecureDashboard(
+        db_connection=db_connection_mock,
+        secret_scanner=SecretScanner(),
+        workspace_root=tmp_path,
+    )
+
+    response = dashboard.serve_request(
+        "POST",
+        "/api/v1/tasks",
+        body=json.dumps({
+            "task": "README作成",
+            "instruction": "整備",
+            "repository_path": "https://github.com/../repo",
+        }),
+    )
+
+    assert response["status"] == 400
+    assert response["json"] == {"error": "invalid_repository_path"}
+
+
 def test_dashboard_rejects_subdirectory_of_first_effective_banned_root(db_connection_mock, tmp_path):
     workspace_root = tmp_path / "workspace"
     banned_root = workspace_root / "restricted"
@@ -159,6 +201,38 @@ def test_dashboard_rejects_subdirectory_of_first_effective_banned_root(db_connec
 
     assert response["status"] == 400
     assert response["json"] == {"error": "invalid_repository_path"}
+
+
+def test_dashboard_persists_github_repository_url_and_clone_metadata(db_connection_mock, tmp_path):
+    dashboard = SecureDashboard(
+        db_connection=db_connection_mock,
+        secret_scanner=SecretScanner(),
+        workspace_root=tmp_path,
+    )
+
+    response = dashboard.serve_request(
+        "POST",
+        "/api/v1/tasks",
+        body=json.dumps({
+            "task": "README作成",
+            "instruction": "整備",
+            "repository_path": "https://github.com/example/project",
+            "target_ref": "develop",
+        }),
+    )
+
+    created_task_id = response["json"]["task"]["id"]
+    created_task = db_connection_mock.tasks[created_task_id]
+    assert response["status"] == 201
+    assert response["json"]["task"]["phase"] == 0
+    assert response["json"]["task"]["repository_path"] == "https://github.com/example/project.git"
+    assert response["json"]["task"]["workspace_path"] == f"/workspace/{created_task_id}"
+    assert created_task["workspace_path"] == f"/workspace/{created_task_id}"
+    assert created_task["target_repo"] == "example/project"
+    assert created_task["target_ref"] == "develop"
+    assert created_task["working_branch"] == f"mn2/{created_task_id}/phase0"
+    assert created_task["payload_json"]["repository_path"] == "https://github.com/example/project.git"
+    assert created_task["payload_json"]["phase_flow"] == [0, 1, 2, 3, 4, 5]
 
 
 def test_dashboard_persists_repository_path_and_exposes_it(db_connection_mock, tmp_path):

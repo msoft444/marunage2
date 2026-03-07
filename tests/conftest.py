@@ -68,6 +68,9 @@ class FakeMariaDBConnection:
                 "assigned_service": "brain",
                 "priority": 0,
                 "workspace_path": None,
+                "target_repo": None,
+                "target_ref": None,
+                "working_branch": None,
                 "started_at": None,
             },
             2: {
@@ -79,6 +82,9 @@ class FakeMariaDBConnection:
                 "assigned_service": "brain",
                 "priority": 0,
                 "workspace_path": None,
+                "target_repo": None,
+                "target_ref": None,
+                "working_branch": None,
                 "started_at": None,
             },
             3: {
@@ -90,6 +96,9 @@ class FakeMariaDBConnection:
                 "assigned_service": "brain",
                 "priority": 0,
                 "workspace_path": None,
+                "target_repo": None,
+                "target_ref": None,
+                "working_branch": None,
                 "started_at": None,
             },
         }
@@ -130,11 +139,11 @@ class FakeMariaDBConnection:
                     "lease_expires_at": selected["lease_expires_at"],
                 }
             return FakeCursor([task] if task else [], 1 if task else 0)
-        if normalized == "SELECT workspace_path FROM tasks WHERE id = %s":
+        if normalized == "SELECT workspace_path, target_repo FROM tasks WHERE id = %s":
             selected = self.tasks.get(params[0])
             if selected is None:
                 return FakeCursor([], 0)
-            return FakeCursor([{"workspace_path": selected.get("workspace_path")}], 1)
+            return FakeCursor([{"workspace_path": selected.get("workspace_path"), "target_repo": selected.get("target_repo")}], 1)
         if "FROM tasks WHERE assigned_service = %s AND status = 'queued'" in normalized:
             service_name = params[0]
             candidates = [
@@ -151,9 +160,12 @@ class FakeMariaDBConnection:
                     "assigned_service": selected["assigned_service"],
                     "priority": selected["priority"],
                     "workspace_path": selected.get("workspace_path"),
+                    "target_repo": selected.get("target_repo"),
+                    "target_ref": selected.get("target_ref"),
+                    "working_branch": selected.get("working_branch"),
                 }
             return FakeCursor([task] if task else [], 1 if task else 0)
-        if normalized.startswith("SELECT id, root_task_id, task_type, status, assigned_service, priority, workspace_path, result_summary_md, created_at FROM tasks ORDER BY created_at DESC, id DESC LIMIT 50"):
+        if normalized.startswith("SELECT id, root_task_id, task_type, status, assigned_service, priority, workspace_path, target_repo, target_ref, working_branch, result_summary_md, created_at FROM tasks ORDER BY created_at DESC, id DESC LIMIT 50"):
             rows = []
             for task in sorted(self.tasks.values(), key=lambda item: item["id"], reverse=True):
                 rows.append(
@@ -165,12 +177,15 @@ class FakeMariaDBConnection:
                         "assigned_service": task["assigned_service"],
                         "priority": task["priority"],
                         "workspace_path": task.get("workspace_path"),
+                        "target_repo": task.get("target_repo"),
+                        "target_ref": task.get("target_ref"),
+                        "working_branch": task.get("working_branch"),
                         "result_summary_md": task.get("result_summary_md"),
                         "created_at": task.get("created_at", f"t{task['id']}"),
                     }
                 )
             return FakeCursor(rows, len(rows))
-        if normalized.startswith("SELECT id, root_task_id, task_type, phase, status, requested_by_role, assigned_role, assigned_service, priority, workspace_path, payload_json, result_summary_md, lease_owner, lease_expires_at, started_at, finished_at, created_at FROM tasks WHERE id = %s"):
+        if normalized.startswith("SELECT id, root_task_id, task_type, phase, status, requested_by_role, assigned_role, assigned_service, priority, workspace_path, target_repo, target_ref, working_branch, payload_json, result_summary_md, lease_owner, lease_expires_at, started_at, finished_at, created_at FROM tasks WHERE id = %s"):
             selected = self.tasks.get(params[0])
             if selected is None:
                 return FakeCursor([], 0)
@@ -187,6 +202,9 @@ class FakeMariaDBConnection:
                         "assigned_service": selected["assigned_service"],
                         "priority": selected["priority"],
                         "workspace_path": selected.get("workspace_path"),
+                        "target_repo": selected.get("target_repo"),
+                        "target_ref": selected.get("target_ref"),
+                        "working_branch": selected.get("working_branch"),
                         "payload_json": selected.get("payload_json"),
                         "result_summary_md": selected.get("result_summary_md"),
                         "lease_owner": selected["lease_owner"],
@@ -266,7 +284,7 @@ class FakeMariaDBConnection:
             task["lease_expires_at"] = None
             task["started_at"] = None
             return FakeCursor([], 1)
-        if normalized.startswith("INSERT INTO tasks (root_task_id, task_type, phase, status, requested_by_role, assigned_role, assigned_service, priority, workspace_path, payload_json, retry_count, max_retry, approval_required) VALUES"):
+        if normalized.startswith("INSERT INTO tasks (root_task_id, task_type, phase, status, requested_by_role, assigned_role, assigned_service, priority, workspace_path, target_repo, target_ref, working_branch, payload_json, retry_count, max_retry, approval_required) VALUES"):
             (
                 root_task_id,
                 task_type,
@@ -277,6 +295,9 @@ class FakeMariaDBConnection:
                 assigned_service,
                 priority,
                 workspace_path,
+                target_repo,
+                target_ref,
+                working_branch,
                 payload_json,
                 retry_count,
                 max_retry,
@@ -293,6 +314,9 @@ class FakeMariaDBConnection:
                 "assigned_service": assigned_service,
                 "priority": priority,
                 "workspace_path": workspace_path,
+                "target_repo": target_repo,
+                "target_ref": target_ref,
+                "working_branch": working_branch,
                 "started_at": None,
                 "finished_at": None,
                 "task_type": task_type,
@@ -307,10 +331,15 @@ class FakeMariaDBConnection:
                 "created_at": f"t{task_id}",
             }
             return FakeCursor([], 1, lastrowid=task_id)
-        if normalized.startswith("UPDATE tasks SET root_task_id = %s WHERE id = %s"):
-            root_task_id, task_id = params
+        if normalized.startswith("UPDATE tasks SET root_task_id = %s, workspace_path = %s, target_repo = %s, target_ref = %s, working_branch = %s, payload_json = %s WHERE id = %s"):
+            root_task_id, workspace_path, target_repo, target_ref, working_branch, payload_json, task_id = params
             task = self.tasks[task_id]
             task["root_task_id"] = root_task_id
+            task["workspace_path"] = workspace_path
+            task["target_repo"] = target_repo
+            task["target_ref"] = target_ref
+            task["working_branch"] = working_branch
+            task["payload_json"] = json.loads(payload_json)
             return FakeCursor([], 1)
         if normalized == "UPDATE tasks SET status = 'queued' WHERE status = 'blocked'":
             task_ids = [task_id for task_id, task in self.tasks.items() if task["status"] == "blocked"]

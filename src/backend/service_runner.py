@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+from pathlib import Path
 from typing import Callable
 
 from .database import TaskConsistencyError
@@ -17,13 +18,19 @@ class WorkerEngine:
     service_name: str
     worker_name: str
     connection_factory: Callable[[], object] | None = None
+    git_command_runner: Callable[[list[str], Path], None] | None = None
+    workspace_root: str | Path = "/workspace"
 
     def __post_init__(self) -> None:
         self._bind_connection(self.connection)
 
     def _bind_connection(self, connection: object) -> None:
         self.connection = connection
-        self.task_backend = MariaDBTaskBackend(connection)
+        self.task_backend = MariaDBTaskBackend(
+            connection,
+            git_command_runner=self.git_command_runner,
+            workspace_root=self.workspace_root,
+        )
 
     def ensure_connection(self) -> bool:
         ping = getattr(self.connection, "ping", None)

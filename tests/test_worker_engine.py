@@ -1,4 +1,5 @@
 import logging
+from pathlib import Path
 
 from backend.service_runner import WorkerEngine
 
@@ -61,3 +62,81 @@ def test_worker_resolves_task_working_directory(db_connection_mock):
     working_directory = engine.task_working_directory(1)
 
     assert working_directory == "/workspace/repo-a"
+
+
+def test_worker_clones_github_repository_and_creates_branch(db_connection_mock, tmp_path):
+    commands: list[tuple[list[str], Path]] = []
+
+    def fake_git_runner(args: list[str], cwd: Path) -> None:
+        commands.append((args, cwd))
+        if args[:2] == ["git", "clone"]:
+            Path(args[-1]).mkdir(parents=True, exist_ok=True)
+
+    db_connection_mock.tasks[1]["workspace_path"] = str(tmp_path / "1")
+    db_connection_mock.tasks[1]["target_repo"] = "example/project"
+    db_connection_mock.tasks[1]["target_ref"] = "develop"
+    db_connection_mock.tasks[1]["working_branch"] = "mn2/1/phase0"
+
+    engine = WorkerEngine(
+        db_connection_mock,
+        service_name="brain",
+        worker_name="worker-brain-1",
+        git_command_runner=fake_git_runner,
+        workspace_root=tmp_path,
+    )
+
+    processed = engine.run_once()
+
+    workspace_root = tmp_path / "1"
+    assert processed is True
+    assert (workspace_root / "artifacts").is_dir()
+    assert (workspace_root / "system_docs_snapshot").is_dir()
+    assert (workspace_root / "patches").is_dir()
+    assert commands == [
+        (["git", "clone", "https://github.com/example/project.git", str(workspace_root / "repo")], workspace_root),
+        (["git", "checkout", "develop"], workspace_root / "repo"),
+        (["git", "checkout", "-B", "mn2/1/phase0"], workspace_root / "repo"),
+    ]
+
+
+def test_worker_blocks_task_when_repository_prepare_fails(db_connection_mock, tmp_path):
+    def failing_git_runner(args: list[str], cwd: Path) -> None:
+        raise RuntimeError("clone failed")
+
+    db_connection_mock.tasks[1]["workspace_path"] = str(tmp_path / "1")
+    db_connection_mock.tasks[1]["target_repo"] = "example/project"
+    db_connection_mock.tasks[1]["target_ref"] = "main"
+    db_connection_mock.tasks[1]["working_branch"] = "mn2/1/phase0"
+
+    engine = WorkerEngine(
+        db_connection_mock,
+        service_name="brain",
+        worker_name="worker-brain-1",
+        git_command_runner=failing_git_runner,
+        workspace_root=tmp_path,
+    )
+
+    processed = engine.run_once()
+
+    assert processed is True
+    assert db_connection_mock.tasks[1]["status"] == "blocked"
+    assert any(log["event_type"] == "repository_prepare_failed" for log in db_connection_mock.logs)
+
+
+def test_worker_blocks_task_when_workspace_path_is_invalid(db_connection_mock):
+    db_connection_mock.tasks[1]["workspace_path"] = "/workspace/../etc"
+    db_connection_mock.tasks[1]["target_repo"] = "example/project"
+    db_connection_mock.tasks[1]["target_ref"] = "main"
+    db_connection_mock.tasks[1]["working_branch"] = "mn2/1/phase0"
+
+    engine = WorkerEngine(
+        db_connection_mock,
+        service_name="brain",
+        worker_name="worker-brain-1",
+    )
+
+    processed = engine.run_once()
+
+    assert processed is True
+    assert db_connection_mock.tasks[1]["status"] == "blocked"
+    assert any(log["event_type"] == "invalid_workspace_path" for log in db_connection_mock.logs)

@@ -74,12 +74,12 @@
                 <input id="task-title" name="task" type="text" placeholder="例: README を更新" required />
               </label>
               <label>
-                <span>実行指示</span>
-                <textarea id="task-instruction" name="instruction" rows="6" placeholder="依頼内容を具体的に記述"></textarea>
+                <span>対象リポジトリ</span>
+                <input id="task-repository-path" name="repository_path" type="text" placeholder="例: /workspace/repo-a または https://github.com/org/repo" />
               </label>
               <label>
-                <span>対象リポジトリ</span>
-                <input id="task-repository-path" name="repository_path" type="text" placeholder="例: /workspace/repo-a" />
+                <span>依頼内容</span>
+                <textarea id="task-instruction" name="instruction" rows="6" placeholder="依頼内容を具体的に記述"></textarea>
               </label>
               <div class="form-actions">
                 <button id="task-submit" type="submit">丸投げ実行</button>

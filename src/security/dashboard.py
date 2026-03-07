@@ -115,20 +115,28 @@ class SecureDashboard:
         payload_text = json.dumps(request_payload, ensure_ascii=False, sort_keys=True)
         scan_result = self.secret_scanner.scan_multistage(payload_text)
         task_status = "blocked" if scan_result["blocked"] else "queued"
-        task_type = str(request_payload.get("task_type") or "documentation")
+        repository_context = self._resolve_repository_context(
+            request_payload.get("repository_path"),
+            request_payload.get("target_ref"),
+        )
+        if request_payload.get("repository_path") and repository_context is None:
+            return self._json_response(400, {"error": "invalid_repository_path"})
+        default_phase = 0 if repository_context and repository_context["requires_clone"] else 4
+        default_task_type = "requirement_session" if repository_context and repository_context["requires_clone"] else "documentation"
+        task_type = str(request_payload.get("task_type") or default_task_type)
         assigned_service = str(request_payload.get("assigned_service") or "brain")
         assigned_role = str(request_payload.get("assigned_role") or assigned_service)
-        repository_path = self._validate_repository_path(request_payload.get("repository_path"))
-        if request_payload.get("repository_path") and repository_path is None:
-            return self._json_response(400, {"error": "invalid_repository_path"})
         try:
-            phase = self._coerce_int_field(request_payload, "phase", 4)
+            phase = self._coerce_int_field(request_payload, "phase", default_phase)
             priority = self._coerce_int_field(request_payload, "priority", 0)
         except ValueError as error:
             return self._json_response(400, {"error": "invalid_payload", "field": str(error)})
         payload_json = dict(request_payload)
-        if repository_path is not None:
-            payload_json["repository_path"] = repository_path
+        if repository_context is not None:
+            payload_json["repository_path"] = repository_context["repository_path"]
+            if repository_context["requires_clone"]:
+                payload_json["phase_flow"] = [0, 1, 2, 3, 4, 5]
+                payload_json["repository_source"] = "github_url"
         payload_json["security_scan"] = {
             "blocked": scan_result["blocked"],
             "decode_depth": scan_result["decode_depth"],
@@ -140,8 +148,8 @@ class SecureDashboard:
                 (
                     "INSERT INTO tasks ("
                     "root_task_id, task_type, phase, status, requested_by_role, assigned_role, assigned_service, "
-                    "priority, workspace_path, payload_json, retry_count, max_retry, approval_required"
-                    ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                    "priority, workspace_path, target_repo, target_ref, working_branch, payload_json, retry_count, max_retry, approval_required"
+                    ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
                 ),
                 (
                     0,
@@ -152,7 +160,10 @@ class SecureDashboard:
                     assigned_role,
                     assigned_service,
                     priority,
-                    repository_path,
+                    repository_context["workspace_path"] if repository_context else None,
+                    repository_context["target_repo"] if repository_context else None,
+                    repository_context["target_ref"] if repository_context else None,
+                    repository_context["working_branch"] if repository_context else None,
                     json.dumps(payload_json, ensure_ascii=False),
                     0,
                     3,
@@ -160,7 +171,26 @@ class SecureDashboard:
                 ),
             )
             task_id = self._last_insert_id(cursor, connection)
-            cursor.execute("UPDATE tasks SET root_task_id = %s WHERE id = %s", (task_id, task_id))
+            repository_context = self._finalize_repository_context(task_id, repository_context)
+            if repository_context is not None:
+                payload_json["repository_path"] = repository_context["repository_path"]
+                if repository_context["requires_clone"]:
+                    payload_json["clone_destination"] = f"{repository_context['workspace_path']}/repo"
+            cursor.execute(
+                (
+                    "UPDATE tasks SET root_task_id = %s, workspace_path = %s, target_repo = %s, target_ref = %s, working_branch = %s, payload_json = %s "
+                    "WHERE id = %s"
+                ),
+                (
+                    task_id,
+                    repository_context["workspace_path"] if repository_context else None,
+                    repository_context["target_repo"] if repository_context else None,
+                    repository_context["target_ref"] if repository_context else None,
+                    repository_context["working_branch"] if repository_context else None,
+                    json.dumps(payload_json, ensure_ascii=False),
+                    task_id,
+                ),
+            )
             cursor.execute(
                 (
                     "INSERT INTO logs (task_id, root_task_id, service, component, level, event_type, message, details_json, trace_id) "
@@ -199,7 +229,7 @@ class SecureDashboard:
             cursor = self._cursor(connection)
             cursor.execute(
                 (
-                    "SELECT id, root_task_id, task_type, status, assigned_service, priority, workspace_path, result_summary_md, created_at "
+                    "SELECT id, root_task_id, task_type, status, assigned_service, priority, workspace_path, target_repo, target_ref, working_branch, result_summary_md, created_at "
                     "FROM tasks ORDER BY created_at DESC, id DESC LIMIT 50"
                 ),
                 (),
@@ -235,7 +265,7 @@ class SecureDashboard:
             cursor.execute(
                 (
                     "SELECT id, root_task_id, task_type, phase, status, requested_by_role, assigned_role, assigned_service, "
-                    "priority, workspace_path, payload_json, result_summary_md, lease_owner, lease_expires_at, started_at, finished_at, created_at "
+                    "priority, workspace_path, target_repo, target_ref, working_branch, payload_json, result_summary_md, lease_owner, lease_expires_at, started_at, finished_at, created_at "
                     "FROM tasks WHERE id = %s"
                 ),
                 (task_id,),
@@ -312,16 +342,35 @@ class SecureDashboard:
                 pass
         result = dict(row)
         result["payload_json"] = payload_json
-        result["repository_path"] = row.get("workspace_path") or (payload_json or {}).get("repository_path")
+        result["repository_path"] = (payload_json or {}).get("repository_path") or row.get("workspace_path")
+        result["workspace_path"] = row.get("workspace_path")
         return result
 
-    def _validate_repository_path(self, repository_path: Any) -> str | None:
+    def _resolve_repository_context(self, repository_path: Any, target_ref: Any) -> dict[str, Any] | None:
         if repository_path in (None, ""):
             return None
         if not isinstance(repository_path, str):
             return None
         if not self.sandbox.validate_control_chars(repository_path):
             return None
+
+        github_context = self._parse_github_repository_url(repository_path, target_ref)
+        if github_context is not None:
+            return github_context
+
+        local_path = self._validate_local_repository_path(repository_path)
+        if local_path is None:
+            return None
+        return {
+            "repository_path": local_path,
+            "workspace_path": local_path,
+            "target_repo": None,
+            "target_ref": None,
+            "working_branch": None,
+            "requires_clone": False,
+        }
+
+    def _validate_local_repository_path(self, repository_path: str) -> str | None:
         candidate = Path(repository_path)
         try:
             resolved = candidate.resolve(strict=True)
@@ -341,6 +390,65 @@ class SecureDashboard:
         if any(resolved == banned_root or resolved.is_relative_to(banned_root) for banned_root in effective_banned_roots):
             return None
         return str(resolved)
+
+    def _parse_github_repository_url(self, repository_path: str, target_ref: Any) -> dict[str, Any] | None:
+        parsed = urlparse(repository_path)
+        if parsed.scheme not in {"http", "https"}:
+            return None
+        if (parsed.hostname or "").lower() != "github.com":
+            return None
+        if parsed.params or parsed.query or parsed.fragment:
+            return None
+        path_parts = [part for part in parsed.path.split("/") if part]
+        if len(path_parts) != 2:
+            return None
+        owner, repo_name = path_parts
+        if repo_name.endswith(".git"):
+            repo_name = repo_name[:-4]
+        if not owner or not repo_name:
+            return None
+        if not self._is_safe_git_identifier(owner) or not self._is_safe_git_identifier(repo_name):
+            return None
+        normalized_ref = self._validate_target_ref(target_ref)
+        if normalized_ref is None:
+            return None
+        normalized_url = f"https://github.com/{owner}/{repo_name}.git"
+        return {
+            "repository_path": normalized_url,
+            "workspace_path": None,
+            "target_repo": f"{owner}/{repo_name}",
+            "target_ref": normalized_ref,
+            "working_branch": None,
+            "requires_clone": True,
+        }
+
+    def _finalize_repository_context(self, task_id: int, repository_context: dict[str, Any] | None) -> dict[str, Any] | None:
+        if repository_context is None or not repository_context["requires_clone"]:
+            return repository_context
+        return {
+            **repository_context,
+            "workspace_path": f"/workspace/{task_id}",
+            "working_branch": f"mn2/{task_id}/phase0",
+        }
+
+    @staticmethod
+    def _is_safe_git_identifier(value: str) -> bool:
+        if value in {".", ".."}:
+            return False
+        return all(char.isalnum() or char in {"-", "_", "."} for char in value)
+
+    def _validate_target_ref(self, target_ref: Any) -> str | None:
+        if target_ref in (None, ""):
+            return "main"
+        if not isinstance(target_ref, str):
+            return None
+        if not self.sandbox.validate_control_chars(target_ref):
+            return None
+        if target_ref.startswith("-"):
+            return None
+        if not all(char.isalnum() or char in {"-", "_", ".", "/"} for char in target_ref):
+            return None
+        return target_ref
 
     def _serve_asset(self, relative_path: str) -> dict:
         if "\x00" in relative_path:
