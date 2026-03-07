@@ -52,3 +52,12 @@ def test_worker_reconnects_database_connection(db_connection_mock, caplog):
     assert engine.connection is replacement_connection
     db_connection_mock.close.assert_called_once()
     assert "brain database reconnection succeeded" in caplog.text
+
+
+def test_worker_resolves_task_working_directory(db_connection_mock):
+    db_connection_mock.tasks[1]["workspace_path"] = "/workspace/repo-a"
+    engine = WorkerEngine(db_connection_mock, service_name="brain", worker_name="worker-brain-1")
+
+    working_directory = engine.task_working_directory(1)
+
+    assert working_directory == "/workspace/repo-a"

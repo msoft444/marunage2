@@ -34,6 +34,7 @@ function renderTaskList(tasks) {
       <div>
         <p class="task-title">#${escapeHtml(task.id)} ${escapeHtml(task.task_type)}</p>
         <p class="task-meta">${escapeHtml(task.assigned_service)} / ${escapeHtml(task.status)}</p>
+        <p class="task-meta">${escapeHtml(task.repository_path || 'repo 未指定')}</p>
       </div>
       <a class="detail-link" href="#/tasks/${encodeURIComponent(task.id)}">詳細を表示</a>
     </li>
@@ -53,6 +54,7 @@ function renderTaskDetail(payload) {
     <div><dt>Status</dt><dd>${escapeHtml(payload.task.status)}</dd></div>
     <div><dt>Service</dt><dd>${escapeHtml(payload.task.assigned_service)}</dd></div>
     <div><dt>Type</dt><dd>${escapeHtml(payload.task.task_type)}</dd></div>
+    <div><dt>Repository</dt><dd>${escapeHtml(payload.task.repository_path || 'repo 未指定')}</dd></div>
   `;
   logs.innerHTML = payload.logs.length
     ? payload.logs.map((log) => `<li><strong>${escapeHtml(log.service)}</strong> ${escapeHtml(log.event_type)}<br />${escapeHtml(log.message)}</li>`).join('')
@@ -74,9 +76,10 @@ async function updateHealth(root, output) {
 async function submitTask() {
   const title = document.getElementById('task-title');
   const instruction = document.getElementById('task-instruction');
+  const repositoryPath = document.getElementById('task-repository-path');
   const state = document.getElementById('submit-state');
   const message = document.getElementById('task-submit-message');
-  if (!title || !instruction || !state || !message) {
+  if (!title || !instruction || !repositoryPath || !state || !message) {
     return;
   }
   state.textContent = 'sending';
@@ -89,6 +92,7 @@ async function submitTask() {
       body: JSON.stringify({
         task: title.value,
         instruction: instruction.value,
+        repository_path: repositoryPath.value,
       }),
     });
     state.textContent = payload.task.status;

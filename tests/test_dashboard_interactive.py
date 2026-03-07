@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 from security import SecretScanner, SecureDashboard
 
@@ -43,6 +44,148 @@ def test_dashboard_lists_newly_submitted_task(db_connection_mock):
     assert create_response["status"] == 201
     created_task_id = create_response["json"]["task"]["id"]
     assert any(task["id"] == created_task_id for task in list_response["json"]["tasks"])
+
+
+def test_dashboard_rejects_nonexistent_repository_path(db_connection_mock, tmp_path):
+    dashboard = SecureDashboard(
+        db_connection=db_connection_mock,
+        secret_scanner=SecretScanner(),
+        workspace_root=tmp_path,
+    )
+
+    response = dashboard.serve_request(
+        "POST",
+        "/api/v1/tasks",
+        body=json.dumps({
+            "task": "README作成",
+            "instruction": "整備",
+            "repository_path": str(tmp_path / "missing-repo"),
+        }),
+    )
+
+    assert response["status"] == 400
+    assert response["json"] == {"error": "invalid_repository_path"}
+
+
+def test_dashboard_rejects_system_repository_path(db_connection_mock, tmp_path):
+    dashboard = SecureDashboard(
+        db_connection=db_connection_mock,
+        secret_scanner=SecretScanner(),
+        workspace_root=tmp_path,
+    )
+
+    response = dashboard.serve_request(
+        "POST",
+        "/api/v1/tasks",
+        body=json.dumps({
+            "task": "README作成",
+            "instruction": "整備",
+            "repository_path": "/etc",
+        }),
+    )
+
+    assert response["status"] == 400
+    assert response["json"] == {"error": "invalid_repository_path"}
+
+
+def test_dashboard_rejects_system_repository_subdirectory(db_connection_mock, tmp_path):
+    dashboard = SecureDashboard(
+        db_connection=db_connection_mock,
+        secret_scanner=SecretScanner(),
+        workspace_root=tmp_path,
+    )
+
+    response = dashboard.serve_request(
+        "POST",
+        "/api/v1/tasks",
+        body=json.dumps({
+            "task": "README作成",
+            "instruction": "整備",
+            "repository_path": "/etc/nginx",
+        }),
+    )
+
+    assert response["status"] == 400
+    assert response["json"] == {"error": "invalid_repository_path"}
+
+
+def test_dashboard_rejects_repository_path_outside_workspace_root(db_connection_mock, tmp_path):
+    repo_path = tmp_path.parent / "external-repo"
+    repo_path.mkdir(exist_ok=True)
+    dashboard = SecureDashboard(
+        db_connection=db_connection_mock,
+        secret_scanner=SecretScanner(),
+        workspace_root=tmp_path,
+    )
+
+    response = dashboard.serve_request(
+        "POST",
+        "/api/v1/tasks",
+        body=json.dumps({
+            "task": "README作成",
+            "instruction": "整備",
+            "repository_path": str(repo_path),
+        }),
+    )
+
+    assert response["status"] == 400
+    assert response["json"] == {"error": "invalid_repository_path"}
+
+
+def test_dashboard_rejects_subdirectory_of_first_effective_banned_root(db_connection_mock, tmp_path):
+    workspace_root = tmp_path / "workspace"
+    banned_root = workspace_root / "restricted"
+    repo_path = banned_root / "repo-a"
+    repo_path.mkdir(parents=True)
+    dashboard = SecureDashboard(
+        db_connection=db_connection_mock,
+        secret_scanner=SecretScanner(),
+        workspace_root=workspace_root,
+    )
+    dashboard._banned_repository_roots = (
+        Path("/").resolve(strict=False),
+        banned_root.resolve(strict=False),
+    )
+
+    response = dashboard.serve_request(
+        "POST",
+        "/api/v1/tasks",
+        body=json.dumps({
+            "task": "README作成",
+            "instruction": "整備",
+            "repository_path": str(repo_path),
+        }),
+    )
+
+    assert response["status"] == 400
+    assert response["json"] == {"error": "invalid_repository_path"}
+
+
+def test_dashboard_persists_repository_path_and_exposes_it(db_connection_mock, tmp_path):
+    repo_path = tmp_path / "repo-a"
+    repo_path.mkdir()
+    dashboard = SecureDashboard(
+        db_connection=db_connection_mock,
+        secret_scanner=SecretScanner(),
+        workspace_root=tmp_path,
+    )
+
+    response = dashboard.serve_request(
+        "POST",
+        "/api/v1/tasks",
+        body=json.dumps({
+            "task": "README作成",
+            "instruction": "整備",
+            "repository_path": str(repo_path),
+        }),
+    )
+
+    created_task_id = response["json"]["task"]["id"]
+    created_task = db_connection_mock.tasks[created_task_id]
+    assert response["status"] == 201
+    assert response["json"]["task"]["repository_path"] == str(repo_path)
+    assert created_task["workspace_path"] == str(repo_path)
+    assert created_task["payload_json"]["repository_path"] == str(repo_path)
 
 
 def test_dashboard_task_detail_includes_logs_and_result(db_connection_mock):

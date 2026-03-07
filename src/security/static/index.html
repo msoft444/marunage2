@@ -77,6 +77,10 @@
                 <span>実行指示</span>
                 <textarea id="task-instruction" name="instruction" rows="6" placeholder="依頼内容を具体的に記述"></textarea>
               </label>
+              <label>
+                <span>対象リポジトリ</span>
+                <input id="task-repository-path" name="repository_path" type="text" placeholder="例: /workspace/repo-a" />
+              </label>
               <div class="form-actions">
                 <button id="task-submit" type="submit">丸投げ実行</button>
                 <p id="task-submit-message" class="helper-text">投稿したタスクは右側の一覧から追跡できます。</p>

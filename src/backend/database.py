@@ -28,6 +28,7 @@ class QueueTaskRow:
     status: str
     assigned_service: str
     priority: int
+    workspace_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -98,7 +99,7 @@ class MariaDBAccessor:
 
     def select_next_queued_task(self, service_name: str) -> QueueTaskRow | None:
         query = (
-            "SELECT id, root_task_id, status, assigned_service, priority "
+            "SELECT id, root_task_id, status, assigned_service, priority, workspace_path "
             "FROM tasks WHERE assigned_service = %s AND status = 'queued' "
             "ORDER BY priority DESC, created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED"
         )
@@ -107,6 +108,14 @@ class MariaDBAccessor:
         if row is None:
             return None
         return QueueTaskRow(**row)
+
+    def select_task_workspace_path(self, task_id: int) -> str | None:
+        query = "SELECT workspace_path FROM tasks WHERE id = %s"
+        cursor = self._execute(query, (task_id,))
+        row = self._fetchone_dict(cursor)
+        if row is None:
+            raise TaskConsistencyError(f"task {task_id} does not exist")
+        return row.get("workspace_path")
 
     def select_expired_tasks_for_requeue(self, service_name: str) -> list[RecoverableTaskRow]:
         query = (

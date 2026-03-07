@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 import nh3
 
 from .secret_scanner import SecretScanner
+from .sandbox import WorkspaceSandbox
 
 
 class SecureDashboard:
@@ -29,11 +30,17 @@ class SecureDashboard:
         db_connection: Any | None = None,
         connection_factory: Callable[[], Any] | None = None,
         secret_scanner: SecretScanner | None = None,
+        workspace_root: Path | str | None = None,
     ):
         self.asset_root = asset_root or Path(__file__).resolve().parent / "static"
         self.db_connection = db_connection
         self.connection_factory = connection_factory
         self.secret_scanner = secret_scanner or SecretScanner()
+        self.workspace_root = Path(workspace_root).resolve(strict=False) if workspace_root else Path.cwd().resolve(strict=False)
+        self.sandbox = WorkspaceSandbox(str(self.workspace_root))
+        self._banned_repository_roots = tuple(
+            Path(path).resolve(strict=False) for path in ("/", "/etc", "/bin", "/sbin", "/usr", "/var", "/private", "/dev", "/System")
+        )
 
     def render_markdown(self, content_md: str) -> str:
         return nh3.clean(
@@ -111,12 +118,17 @@ class SecureDashboard:
         task_type = str(request_payload.get("task_type") or "documentation")
         assigned_service = str(request_payload.get("assigned_service") or "brain")
         assigned_role = str(request_payload.get("assigned_role") or assigned_service)
+        repository_path = self._validate_repository_path(request_payload.get("repository_path"))
+        if request_payload.get("repository_path") and repository_path is None:
+            return self._json_response(400, {"error": "invalid_repository_path"})
         try:
             phase = self._coerce_int_field(request_payload, "phase", 4)
             priority = self._coerce_int_field(request_payload, "priority", 0)
         except ValueError as error:
             return self._json_response(400, {"error": "invalid_payload", "field": str(error)})
         payload_json = dict(request_payload)
+        if repository_path is not None:
+            payload_json["repository_path"] = repository_path
         payload_json["security_scan"] = {
             "blocked": scan_result["blocked"],
             "decode_depth": scan_result["decode_depth"],
@@ -128,8 +140,8 @@ class SecureDashboard:
                 (
                     "INSERT INTO tasks ("
                     "root_task_id, task_type, phase, status, requested_by_role, assigned_role, assigned_service, "
-                    "priority, payload_json, retry_count, max_retry, approval_required"
-                    ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                    "priority, workspace_path, payload_json, retry_count, max_retry, approval_required"
+                    ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
                 ),
                 (
                     0,
@@ -140,6 +152,7 @@ class SecureDashboard:
                     assigned_role,
                     assigned_service,
                     priority,
+                    repository_path,
                     json.dumps(payload_json, ensure_ascii=False),
                     0,
                     3,
@@ -186,7 +199,7 @@ class SecureDashboard:
             cursor = self._cursor(connection)
             cursor.execute(
                 (
-                    "SELECT id, root_task_id, task_type, status, assigned_service, priority, result_summary_md, created_at "
+                    "SELECT id, root_task_id, task_type, status, assigned_service, priority, workspace_path, result_summary_md, created_at "
                     "FROM tasks ORDER BY created_at DESC, id DESC LIMIT 50"
                 ),
                 (),
@@ -222,7 +235,7 @@ class SecureDashboard:
             cursor.execute(
                 (
                     "SELECT id, root_task_id, task_type, phase, status, requested_by_role, assigned_role, assigned_service, "
-                    "priority, payload_json, result_summary_md, lease_owner, lease_expires_at, started_at, finished_at, created_at "
+                    "priority, workspace_path, payload_json, result_summary_md, lease_owner, lease_expires_at, started_at, finished_at, created_at "
                     "FROM tasks WHERE id = %s"
                 ),
                 (task_id,),
@@ -299,7 +312,35 @@ class SecureDashboard:
                 pass
         result = dict(row)
         result["payload_json"] = payload_json
+        result["repository_path"] = row.get("workspace_path") or (payload_json or {}).get("repository_path")
         return result
+
+    def _validate_repository_path(self, repository_path: Any) -> str | None:
+        if repository_path in (None, ""):
+            return None
+        if not isinstance(repository_path, str):
+            return None
+        if not self.sandbox.validate_control_chars(repository_path):
+            return None
+        candidate = Path(repository_path)
+        try:
+            resolved = candidate.resolve(strict=True)
+        except (FileNotFoundError, OSError, RuntimeError):
+            return None
+        if not resolved.is_dir():
+            return None
+        if resolved == Path("/").resolve(strict=False):
+            return None
+        if not self.sandbox.validate_workspace_path(str(resolved)):
+            return None
+        effective_banned_roots = tuple(
+            banned_root
+            for banned_root in self._banned_repository_roots
+            if self.workspace_root != banned_root and not self.workspace_root.is_relative_to(banned_root)
+        )
+        if any(resolved == banned_root or resolved.is_relative_to(banned_root) for banned_root in effective_banned_roots):
+            return None
+        return str(resolved)
 
     def _serve_asset(self, relative_path: str) -> dict:
         if "\x00" in relative_path:

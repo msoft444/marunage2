@@ -90,6 +90,9 @@ class MariaDBTaskBackend:
             )
             return True
 
+    def task_working_directory(self, task_id: int) -> str | None:
+        return self.db.select_task_workspace_path(task_id)
+
     def recover_expired_tasks(self, service_name: str, worker_name: str) -> list[int]:
         with self.db.transaction():
             expired_tasks = self.db.select_expired_tasks_for_requeue(service_name)

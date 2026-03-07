@@ -63,3 +63,6 @@ class WorkerEngine:
 
     def run_once(self) -> bool:
         return self.task_backend.process_next_queued_task(self.service_name, self.worker_name)
+
+    def task_working_directory(self, task_id: int) -> str | None:
+        return self.task_backend.task_working_directory(task_id)
