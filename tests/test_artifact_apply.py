@@ -1,9 +1,10 @@
+import base64
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from backend.repository_workspace import ArtifactApplyError, RepositoryWorkspaceManager
+from backend.repository_workspace import CommitPushError, RepositoryWorkspaceManager
 
 
 def _git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -37,19 +38,15 @@ def _init_workspace_repo(tmp_path: Path) -> tuple[Path, Path, Path]:
     return workspace, repo, origin
 
 
-def test_repository_workspace_manager_applies_diff_commits_and_pushes(tmp_path, monkeypatch):
+def test_repository_workspace_manager_commits_changed_files_and_pushes(tmp_path, monkeypatch):
     workspace, repo, origin = _init_workspace_repo(tmp_path)
     token = "ghp_secret_token_123"
     monkeypatch.setenv("GITHUB_TOKEN", token)
-    artifact = workspace / "artifacts" / "llm_response.md"
-    artifact.write_text(
-        "Proposal\n\n```diff\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n hello\n+updated\n```\n",
-        encoding="utf-8",
-    )
+    (repo / "README.md").write_text("hello\nupdated\n", encoding="utf-8")
 
     manager = RepositoryWorkspaceManager()
 
-    result = manager.apply_artifact(
+    result = manager.commit_and_push(
         workspace_path=str(workspace),
         working_branch="mn2/1/phase0",
         task_title=f"Update README {token}",
@@ -66,41 +63,95 @@ def test_repository_workspace_manager_applies_diff_commits_and_pushes(tmp_path, 
     assert remote_subject == result["commit_message"]
 
 
-def test_repository_workspace_manager_blocks_missing_artifact(tmp_path):
+def test_repository_workspace_manager_blocks_when_no_changes_exist(tmp_path):
     workspace, _repo, _origin = _init_workspace_repo(tmp_path)
     manager = RepositoryWorkspaceManager()
 
-    with pytest.raises(ArtifactApplyError, match="artifact_not_found"):
-        manager.apply_artifact(
+    with pytest.raises(CommitPushError, match="phase_edit_no_changes"):
+        manager.commit_and_push(
             workspace_path=str(workspace),
             working_branch="mn2/1/phase0",
         )
 
 
-def test_repository_workspace_manager_blocks_artifact_without_diff(tmp_path):
-    workspace, _repo, _origin = _init_workspace_repo(tmp_path)
-    artifact = workspace / "artifacts" / "llm_response.md"
-    artifact.write_text("説明だけで diff がありません\n", encoding="utf-8")
+def test_repository_workspace_manager_blocks_secret_in_changed_files(tmp_path, monkeypatch):
+    workspace, repo, _origin = _init_workspace_repo(tmp_path)
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_secret_token_123")
+    (repo / "README.md").write_text("hello\nsecret=ghp_secret_token_123\n", encoding="utf-8")
     manager = RepositoryWorkspaceManager()
 
-    with pytest.raises(ArtifactApplyError, match="no_diff_section"):
-        manager.apply_artifact(
+    with pytest.raises(CommitPushError, match="secret_in_changed_files"):
+        manager.commit_and_push(
             workspace_path=str(workspace),
             working_branch="mn2/1/phase0",
         )
 
 
-def test_repository_workspace_manager_blocks_path_traversal_in_diff(tmp_path):
-    workspace, _repo, _origin = _init_workspace_repo(tmp_path)
-    artifact = workspace / "artifacts" / "llm_response.md"
-    artifact.write_text(
-        "--- a/../evil.txt\n+++ b/../evil.txt\n@@ -1 +1 @@\n-x\n+y\n",
-        encoding="utf-8",
+def test_repository_workspace_manager_rejects_git_metadata_paths(tmp_path, monkeypatch):
+    _workspace, repo, _origin = _init_workspace_repo(tmp_path)
+    manager = RepositoryWorkspaceManager()
+
+    monkeypatch.setattr(manager, "_changed_files", lambda _repo_path: [".git/config"])
+
+    with pytest.raises(CommitPushError, match="git_metadata_write_forbidden"):
+        manager.validate_changed_files(repo)
+
+
+def test_repository_workspace_manager_uses_github_token_header_for_clone(tmp_path, monkeypatch):
+    commands: list[tuple[list[str], Path]] = []
+    token = "token-123"
+    expected_header = base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
+
+    def fake_git_runner(args: list[str], cwd: Path):
+        commands.append((args, cwd))
+        if args[-2] == "clone":
+            Path(args[-1]).mkdir(parents=True, exist_ok=True)
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setenv("GITHUB_TOKEN", token)
+    manager = RepositoryWorkspaceManager(git_command_runner=fake_git_runner)
+
+    manager.prepare_repository(
+        workspace_path=str(tmp_path / "1"),
+        target_repo="example/project",
+        target_ref="main",
+        working_branch="mn2/1/phase0",
     )
-    manager = RepositoryWorkspaceManager()
 
-    with pytest.raises(ArtifactApplyError, match="path_traversal"):
-        manager.apply_artifact(
-            workspace_path=str(workspace),
-            working_branch="mn2/1/phase0",
-        )
+    clone_command = commands[0][0]
+    assert clone_command[:3] == ["git", "-c", f"http.https://github.com/.extraheader=AUTHORIZATION: basic {expected_header}"]
+    assert clone_command[3:] == ["clone", "https://github.com/example/project.git", str(tmp_path / "1" / "repo")]
+
+
+def test_repository_workspace_manager_uses_github_token_header_for_github_push(tmp_path, monkeypatch):
+    workspace = tmp_path / "1"
+    repo = workspace / "repo"
+    repo.mkdir(parents=True)
+    (repo / "README.md").write_text("hello\nupdated\n", encoding="utf-8")
+    commands: list[tuple[list[str], Path]] = []
+    token = "token-123"
+    expected_header = base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
+
+    def fake_git_runner(args: list[str], cwd: Path):
+        commands.append((args, cwd))
+        if args == ["git", "status", "--short"]:
+            return subprocess.CompletedProcess(args, 0, stdout=" M README.md\n", stderr="")
+        if args == ["git", "rev-parse", "HEAD"]:
+            return subprocess.CompletedProcess(args, 0, stdout="abc123\n", stderr="")
+        if args == ["git", "remote", "get-url", "origin"]:
+            return subprocess.CompletedProcess(args, 0, stdout="https://github.com/example/project.git\n", stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setenv("GITHUB_TOKEN", token)
+    manager = RepositoryWorkspaceManager(git_command_runner=fake_git_runner)
+
+    result = manager.commit_and_push(
+        workspace_path=str(workspace),
+        working_branch="mn2/1/phase0",
+        task_title="Update README",
+    )
+
+    push_command = commands[-1][0]
+    assert push_command[:3] == ["git", "-c", f"http.https://github.com/.extraheader=AUTHORIZATION: basic {expected_header}"]
+    assert push_command[3:] == ["push", "origin", "mn2/1/phase0"]
+    assert result["commit_sha"] == "abc123"

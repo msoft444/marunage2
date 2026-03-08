@@ -52,12 +52,12 @@
 - 正本は task 単位で再利用しやすい永続領域とし、初期実装では `tasks.result_summary_md` に要約、詳細本文は artifact ファイルへ保存する。
 - 生成全文は `/workspace/{task_id}/artifacts/llm_response.md` に保存する。
 - `logs` には全文を格納せず、イベント名、結果種別、失敗理由、保存先パスのみを記録する。
-- 後続フェーズが参照する入力は workspace 配下の artifact を一次ソースとし、Dashboard には `result_summary_md` のみを返す。
+- Phase 6 以降、artifact は Copilot 応答ログとして保持する。ファイル反映の一次手段は direct-edit + commit/push であり、Dashboard には `result_summary_md` のみを返す。
 
 ### 2.5 状態遷移方針
 
-- 正常系: `queued` -> `leased` -> `running` -> `waiting_approval` を既定とする。
-- 将来、完全自動実行を許可するフェーズでは `succeeded` へ進められる余地を残すが、初期設計では人手確認のため `waiting_approval` を標準出口とする。
+- 正常系: direct-edit 対象 task は `queued` -> `leased` -> `running` -> `succeeded` を既定とする。Copilot 応答保存後、repository への commit/push 成功をもって完了とみなす。
+- `waiting_approval` は direct-edit pivot 前の legacy 互換経路として残るが、Phase 6 の標準出口ではない。
 - 異常系: `copilot` コマンド未インストール、認証失敗、タイムアウト、空応答、保存失敗は `running` -> `blocked` とする。
 - `failed` はアプリ内部例外ではなく、設計済み異常系に該当しない予期しない処理失敗に限定する。
 
@@ -91,14 +91,14 @@
 ### 3.3 prompt 構成
 
 - LLM へ渡す prompt は、少なくとも task タイトル、`instruction`、対象リポジトリ、作業ブランチ、期待成果物の種類を含む。
-- prompt 先頭で「artifact 生成のみ」「ファイル編集しない」「git push しない」「コマンド実行で repository を変更しない」「応答本文だけを返す」を明示し、Copilot CLI が repo 直接操作へ逸脱しないよう拘束する。
+- prompt 先頭で「リポジトリのファイルを直接編集し、変更を完成させる」「git commit / git push はシステム側で行うため実行しない」「リポジトリ外のファイルを編集しない」を明示する。
 - prompt 本文に `GITHUB_TOKEN`、DB password、未加工の secret scanner 判定情報は含めない。
 - prompt テンプレートは `task_backend` 直書きではなく、専用ヘルパーまたはクライアント側で組み立てられる構造とする。
 
 ### 3.4 保存と参照
 
 - `result_summary_md` には Dashboard で一覧表示できる短い要約を保存する。
-- 生成全文は `artifacts/llm_response.md` に保存し、将来の Feature #3 がこの artifact を入力としてファイル書き出しを行う。
+- 生成全文は `artifacts/llm_response.md` に保存するが、これは監査・参照用の応答ログであり、ファイル書き出しの一次入力ではない。
 - 追加カラムが不要な範囲では既存スキーマを優先し、必要になった時点で `result_payload_json` 相当の拡張を再検討する。
 
 ### 3.5 ログとマスキング
@@ -119,14 +119,17 @@
 1. `brain` が task payload の `instruction` を `copilot` CLI コマンド経由で LLM へ渡し、成功応答を永続化できる。
 2. 追加の LLM API キー（`OPENAI_API_KEY` 等）が不要であり、Phase 3 の `GITHUB_TOKEN` のみで認証が完了する。
 3. コンテナに `copilot` CLI コマンドがインストールされている（`gh` CLI はホスト側のみ）。
-4. 成功時に `logs`、`result_summary_md`、artifact 保存先の整合が取れている。
+4. 成功時に `logs`、`result_summary_md`、artifact 保存先、commit/push 結果の整合が取れている。
 5. `copilot` コマンド未インストール、認証失敗、タイムアウト、空応答で `blocked` へ遷移し、失敗理由が追跡できる。
-6. 後続の Feature #3 が artifact または要約結果を参照してファイル書き出しへ進める。
+6. direct-edit 対象 task は repository 内の変更が `working_branch` に commit/push されて `succeeded` へ遷移する。
 
 ## 5. 関連ドキュメント
 
-1. `.todo/.tdd_protocol.1.md`
-2. `.tdd_protocol.md`
-3. `docs/phase3-container-auth-design.md`
-4. `docs/phase4-llm-integration-destructive-test-design.md`
-5. GitHub Copilot CLI リファレンス: https://docs.github.com/ja/copilot/reference/cli-command-reference
+1. `.tdd_protocol.md`
+2. `docs/phase3-container-auth-design.md`
+3. `docs/phase4-llm-integration-destructive-test-design.md`
+4. GitHub Copilot CLI リファレンス: https://docs.github.com/ja/copilot/reference/cli-command-reference
+
+## 6. Legacy Note
+
+Phase 4 の完了済み実装履歴は、旧 `.todo/.tdd_protocol.1.md` ではなく本設計書と `.tdd_protocol.md` の Activity Log を正本とする。`#1` の `.todo` は退役済み。

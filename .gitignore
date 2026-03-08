@@ -17,3 +17,4 @@ docker-compose.override.yml
 .tdd_protocol.md
 
 .todo/
+.workspace/

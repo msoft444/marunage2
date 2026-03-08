@@ -16,7 +16,7 @@ from .llm_client import (
     LLMServiceError,
     LLMTimeoutError,
 )
-from .repository_workspace import ArtifactApplyError, RepositoryPreparationError, RepositoryWorkspaceManager
+from .repository_workspace import CommitPushError, RepositoryPreparationError, RepositoryWorkspaceManager
 from .state_machine import TaskStateMachine
 
 
@@ -197,100 +197,15 @@ class MariaDBTaskBackend:
                 )
                 return False
 
-            try:
-                normalized_workspace_path = self.db.normalize_task_workspace_path(task.workspace_path)
-            except TaskConsistencyError as error:
-                blocked = self.db.update_task_status(task.id, "waiting_approval", "blocked")
-                if not blocked:
-                    raise TaskConsistencyError(f"task {task.id} could not be blocked after invalid workspace path")
-                self.db.insert_log(
-                    task.id,
-                    task.root_task_id,
-                    service_name,
-                    "invalid_workspace_path",
-                    f"Invalid workspace path: {error}",
-                    worker_name,
-                )
-                return True
-
-            if not normalized_workspace_path or not task.working_branch:
-                blocked = self.db.update_task_status(task.id, "waiting_approval", "blocked")
-                if not blocked:
-                    raise TaskConsistencyError(f"task {task.id} could not be blocked after invalid artifact apply prerequisites")
-                self.db.insert_log(
-                    task.id,
-                    task.root_task_id,
-                    service_name,
-                    "artifact_apply_failed",
-                    "Artifact apply failed: workspace_path and working_branch are required",
-                    worker_name,
-                )
-                return True
-
-            started = self.db.update_task_status(task.id, "waiting_approval", "running")
-            if not started:
-                raise TaskConsistencyError(f"task {task.id} could not transition from waiting_approval to running")
+            blocked = self.db.update_task_status(task.id, "waiting_approval", "blocked")
+            if not blocked:
+                raise TaskConsistencyError(f"task {task.id} could not be blocked after deprecated artifact apply request")
             self.db.insert_log(
                 task.id,
                 task.root_task_id,
                 service_name,
-                "artifact_apply_started",
-                "Artifact apply started",
-                worker_name,
-            )
-
-            task_title = None
-            if isinstance(task.payload_json, dict) and isinstance(task.payload_json.get("task"), str):
-                task_title = task.payload_json["task"].strip()
-
-            try:
-                apply_result = self.repository_workspace.apply_artifact(
-                    workspace_path=normalized_workspace_path,
-                    working_branch=task.working_branch,
-                    task_title=task_title,
-                    result_summary_md=task.result_summary_md,
-                )
-            except ArtifactApplyError as error:
-                blocked = self.db.update_task_status(task.id, "running", "blocked")
-                if not blocked:
-                    raise TaskConsistencyError(f"task {task.id} could not be blocked after artifact apply failure")
-                event_type = "artifact_apply_failed"
-                message = f"Artifact apply failed: {error}"
-                if str(error) == "artifact_apply_no_changes":
-                    event_type = "artifact_apply_no_changes"
-                    message = "Artifact apply produced no changes"
-                self.db.insert_log(
-                    task.id,
-                    task.root_task_id,
-                    service_name,
-                    event_type,
-                    message,
-                    worker_name,
-                )
-                return True
-
-            completed = self.db.update_task_result(
-                task.id,
-                "running",
-                "succeeded",
-                task.result_summary_md or apply_result["commit_message"],
-            )
-            if not completed:
-                raise TaskConsistencyError(f"task {task.id} could not be updated after artifact apply")
-            self.db.insert_log(
-                task.id,
-                task.root_task_id,
-                service_name,
-                "artifact_apply_succeeded",
-                f"Applied artifact and created commit {apply_result['commit_sha']}",
-                worker_name,
-            )
-            self.db.insert_log(
-                task.id,
-                task.root_task_id,
-                service_name,
-                "git_push_succeeded",
-                f"Pushed {apply_result['working_branch']} to origin",
+                "artifact_apply_deprecated",
+                "Artifact apply path is disabled after direct-edit pivot",
                 worker_name,
             )
             return True
@@ -436,6 +351,76 @@ class MariaDBTaskBackend:
             )
             return True
 
+        task_title = None
+        if isinstance(task.payload_json, dict) and isinstance(task.payload_json.get("task"), str):
+            task_title = task.payload_json["task"].strip()
+
+        if task.target_repo:
+            if not workspace_path or not task.working_branch:
+                blocked = self.db.update_task_status(task.id, "running", "blocked")
+                if not blocked:
+                    raise TaskConsistencyError(f"task {task.id} could not be blocked after invalid direct-edit prerequisites")
+                self.db.insert_log(
+                    task.id,
+                    task.root_task_id,
+                    service_name,
+                    "invalid_repository_context",
+                    "Direct-edit requires workspace_path and working_branch",
+                    worker_name,
+                )
+                return True
+
+            try:
+                commit_result = self.repository_workspace.commit_and_push(
+                    workspace_path=workspace_path,
+                    working_branch=task.working_branch,
+                    task_title=task_title,
+                    result_summary_md=summary,
+                )
+            except CommitPushError as error:
+                blocked = self.db.update_task_status(task.id, "running", "blocked")
+                if not blocked:
+                    raise TaskConsistencyError(f"task {task.id} could not be blocked after direct-edit failure")
+                event_type = self._map_commit_push_error_to_event(str(error))
+                self.db.insert_log(
+                    task.id,
+                    task.root_task_id,
+                    service_name,
+                    event_type,
+                    f"Direct-edit failed: {error}",
+                    worker_name,
+                )
+                return True
+
+            completed = self.db.update_task_result(task.id, "running", "succeeded", summary)
+            if not completed:
+                raise TaskConsistencyError(f"task {task.id} could not be updated after direct-edit success")
+            self.db.insert_log(
+                task.id,
+                task.root_task_id,
+                service_name,
+                "llm_generation_succeeded",
+                f"LLM response saved to {artifact_path}",
+                worker_name,
+            )
+            self.db.insert_log(
+                task.id,
+                task.root_task_id,
+                service_name,
+                "git_commit_succeeded",
+                f"Created commit {commit_result['commit_sha']}",
+                worker_name,
+            )
+            self.db.insert_log(
+                task.id,
+                task.root_task_id,
+                service_name,
+                "git_push_succeeded",
+                f"Pushed {commit_result['working_branch']} to origin",
+                worker_name,
+            )
+            return True
+
         completed = self.db.update_task_result(task.id, "running", "waiting_approval", summary)
         if not completed:
             raise TaskConsistencyError(f"task {task.id} could not be updated after llm success")
@@ -467,11 +452,9 @@ class MariaDBTaskBackend:
     @staticmethod
     def _build_prompt(task, instruction: str) -> str:
         prompt_parts = [
-            "You are generating a proposal artifact only.",
-            "Do not edit files.",
-            "Do not run git push.",
-            "Do not run commands that modify the repository.",
-            "Return only the proposed content or patch in markdown.",
+            "リポジトリのファイルを直接編集し、変更を完成させよ。",
+            "git commit / git push は実行するな。システム側で行う。",
+            "リポジトリ外のファイルを編集するな。",
         ]
         if isinstance(task.payload_json, dict) and isinstance(task.payload_json.get("task"), str):
             prompt_parts.append(f"Task: {task.payload_json['task'].strip()}")
@@ -482,6 +465,20 @@ class MariaDBTaskBackend:
         prompt_parts.append("Instruction:")
         prompt_parts.append(instruction)
         return "\n\n".join(prompt_parts)
+
+    @staticmethod
+    def _map_commit_push_error_to_event(error_message: str) -> str:
+        if error_message == "phase_edit_no_changes":
+            return "phase_edit_no_changes"
+        if error_message.startswith("git_commit_failed:"):
+            return "git_commit_failed"
+        if error_message.startswith("git_push_failed:"):
+            return "git_push_failed"
+        if error_message.startswith("too_many_changed_files:"):
+            return "too_many_changed_files"
+        if error_message in {"secret_in_changed_files", "git_metadata_write_forbidden", "path_traversal", "symlink_escape"}:
+            return error_message
+        return "phase_edit_failed"
 
     @staticmethod
     def _build_result_summary(response: str) -> str:

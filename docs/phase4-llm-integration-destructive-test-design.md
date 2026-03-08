@@ -95,6 +95,7 @@
 ## 4. 関連ドキュメント
 
 1. `docs/phase4-llm-integration-design.md`
-2. `.todo/.tdd_protocol.1.md`
-3. `.tdd_protocol.md`
-4. GitHub Copilot CLI リファレンス: https://docs.github.com/ja/copilot/reference/cli-command-reference
+2. `.tdd_protocol.md`
+3. GitHub Copilot CLI リファレンス: https://docs.github.com/ja/copilot/reference/cli-command-reference
+
+補足: Phase 4 の完了済み作業履歴は旧 `.todo/.tdd_protocol.1.md` から `.tdd_protocol.md` と本設計書群へ移管済み。
