@@ -7,7 +7,7 @@ ALLOWED_TRANSITIONS = {
     "leased": {"running", "blocked", "cancelled"},
     "running": {"succeeded", "failed", "blocked", "waiting_approval", "cancelled"},
     "blocked": {"queued"},
-    "waiting_approval": {"succeeded", "cancelled"},
+    "waiting_approval": {"running", "blocked", "succeeded", "cancelled"},
     "succeeded": set(),
     "failed": set(),
     "cancelled": set(),

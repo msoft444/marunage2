@@ -1,6 +1,9 @@
 import logging
 from pathlib import Path
 
+from backend import MariaDBTaskBackend
+from backend.llm_client import LLMConfigurationError, LLMRateLimitError, LLMTimeoutError
+from backend.repository_workspace import ArtifactApplyError
 from backend.service_runner import WorkerEngine
 
 
@@ -140,3 +143,399 @@ def test_worker_blocks_task_when_workspace_path_is_invalid(db_connection_mock):
     assert processed is True
     assert db_connection_mock.tasks[1]["status"] == "blocked"
     assert any(log["event_type"] == "invalid_workspace_path" for log in db_connection_mock.logs)
+
+
+def test_worker_blocks_llm_task_when_workspace_path_escapes_workspace_root(db_connection_mock, tmp_path):
+    class FakeLLMClient:
+        def generate(self, prompt: str, metadata: dict | None = None) -> str:
+            return "READMEを更新しました"
+
+    escaped_root = tmp_path.parent / "escaped-task-1"
+    db_connection_mock.tasks[1]["workspace_path"] = str(tmp_path / ".." / "escaped-task-1")
+    db_connection_mock.tasks[1]["payload_json"] = {
+        "task": "README を更新",
+        "instruction": "README に現在時刻を記載する",
+    }
+
+    engine = WorkerEngine(
+        db_connection_mock,
+        service_name="brain",
+        worker_name="worker-brain-1",
+        llm_client=FakeLLMClient(),
+        workspace_root=tmp_path,
+    )
+
+    processed = engine.run_once()
+
+    assert processed is True
+    assert db_connection_mock.tasks[1]["status"] == "blocked"
+    assert not (escaped_root / "artifacts" / "llm_response.md").exists()
+    assert any(log["event_type"] == "invalid_workspace_path" for log in db_connection_mock.logs)
+
+
+def test_worker_blocks_task_when_instruction_is_missing(db_connection_mock):
+    db_connection_mock.tasks[1]["payload_json"] = {
+        "task": "README を更新",
+    }
+
+    engine = WorkerEngine(
+        db_connection_mock,
+        service_name="brain",
+        worker_name="worker-brain-1",
+    )
+
+    processed = engine.run_once()
+
+    assert processed is True
+    assert db_connection_mock.tasks[1]["status"] == "blocked"
+    assert any(log["event_type"] == "invalid_instruction" for log in db_connection_mock.logs)
+
+
+def test_worker_generates_llm_response_and_moves_task_to_waiting_approval(db_connection_mock, tmp_path):
+    prompts: list[str] = []
+
+    class FakeLLMClient:
+        def generate(self, prompt: str, metadata: dict | None = None) -> str:
+            prompts.append(prompt)
+            return "READMEを更新しました\n\n- 現在時刻を追記しました。"
+
+    def fake_git_runner(args: list[str], cwd: Path) -> None:
+        if args[:2] == ["git", "clone"]:
+            Path(args[-1]).mkdir(parents=True, exist_ok=True)
+
+    db_connection_mock.tasks[1]["workspace_path"] = str(tmp_path / "1")
+    db_connection_mock.tasks[1]["target_repo"] = "example/project"
+    db_connection_mock.tasks[1]["target_ref"] = "main"
+    db_connection_mock.tasks[1]["working_branch"] = "mn2/1/phase0"
+    db_connection_mock.tasks[1]["payload_json"] = {
+        "task": "README を更新",
+        "instruction": "README に現在時刻を記載する",
+    }
+
+    engine = WorkerEngine(
+        db_connection_mock,
+        service_name="brain",
+        worker_name="worker-brain-1",
+        git_command_runner=fake_git_runner,
+        llm_client=FakeLLMClient(),
+        workspace_root=tmp_path,
+    )
+
+    processed = engine.run_once()
+
+    artifact_path = tmp_path / "1" / "artifacts" / "llm_response.md"
+    assert processed is True
+    assert db_connection_mock.tasks[1]["status"] == "waiting_approval"
+    assert db_connection_mock.tasks[1]["result_summary_md"] == "READMEを更新しました"
+    assert artifact_path.read_text(encoding="utf-8") == "READMEを更新しました\n\n- 現在時刻を追記しました。"
+    assert "You are generating a proposal artifact only." in prompts[0]
+    assert "Do not edit files." in prompts[0]
+    assert "Do not run git push." in prompts[0]
+    assert "Return only the proposed content or patch in markdown." in prompts[0]
+    assert "README に現在時刻を記載する" in prompts[0]
+    assert any(log["event_type"] == "llm_generation_started" for log in db_connection_mock.logs)
+    assert any(log["event_type"] == "llm_generation_succeeded" for log in db_connection_mock.logs)
+
+
+def test_worker_blocks_task_when_llm_client_is_not_configured(db_connection_mock, tmp_path):
+    class MissingKeyLLMClient:
+        def generate(self, prompt: str, metadata: dict | None = None) -> str:
+            raise LLMConfigurationError("copilot command is not installed")
+
+    def fake_git_runner(args: list[str], cwd: Path) -> None:
+        if args[:2] == ["git", "clone"]:
+            Path(args[-1]).mkdir(parents=True, exist_ok=True)
+
+    db_connection_mock.tasks[1]["workspace_path"] = str(tmp_path / "1")
+    db_connection_mock.tasks[1]["target_repo"] = "example/project"
+    db_connection_mock.tasks[1]["target_ref"] = "main"
+    db_connection_mock.tasks[1]["working_branch"] = "mn2/1/phase0"
+    db_connection_mock.tasks[1]["payload_json"] = {
+        "task": "README を更新",
+        "instruction": "README に現在時刻を記載する",
+    }
+
+    engine = WorkerEngine(
+        db_connection_mock,
+        service_name="brain",
+        worker_name="worker-brain-1",
+        git_command_runner=fake_git_runner,
+        llm_client=MissingKeyLLMClient(),
+        workspace_root=tmp_path,
+    )
+
+    processed = engine.run_once()
+
+    assert processed is True
+    assert db_connection_mock.tasks[1]["status"] == "blocked"
+    assert any(log["event_type"] == "llm_generation_failed" for log in db_connection_mock.logs)
+
+
+def test_worker_blocks_task_when_llm_times_out(db_connection_mock, tmp_path):
+    class TimeoutLLMClient:
+        def generate(self, prompt: str, metadata: dict | None = None) -> str:
+            raise LLMTimeoutError("LLM request timed out")
+
+    def fake_git_runner(args: list[str], cwd: Path) -> None:
+        if args[:2] == ["git", "clone"]:
+            Path(args[-1]).mkdir(parents=True, exist_ok=True)
+
+    db_connection_mock.tasks[1]["workspace_path"] = str(tmp_path / "1")
+    db_connection_mock.tasks[1]["target_repo"] = "example/project"
+    db_connection_mock.tasks[1]["target_ref"] = "main"
+    db_connection_mock.tasks[1]["working_branch"] = "mn2/1/phase0"
+    db_connection_mock.tasks[1]["payload_json"] = {
+        "task": "README を更新",
+        "instruction": "README に現在時刻を記載する",
+    }
+
+    engine = WorkerEngine(
+        db_connection_mock,
+        service_name="brain",
+        worker_name="worker-brain-1",
+        git_command_runner=fake_git_runner,
+        llm_client=TimeoutLLMClient(),
+        workspace_root=tmp_path,
+    )
+
+    processed = engine.run_once()
+
+    assert processed is True
+    assert db_connection_mock.tasks[1]["status"] == "blocked"
+    assert any(log["event_type"] == "llm_generation_failed" for log in db_connection_mock.logs)
+
+
+def test_worker_blocks_task_when_llm_rate_limit_is_exhausted(db_connection_mock, tmp_path):
+    class RateLimitedLLMClient:
+        def generate(self, prompt: str, metadata: dict | None = None) -> str:
+            raise LLMRateLimitError("LLM rate limit exceeded")
+
+    def fake_git_runner(args: list[str], cwd: Path) -> None:
+        if args[:2] == ["git", "clone"]:
+            Path(args[-1]).mkdir(parents=True, exist_ok=True)
+
+    db_connection_mock.tasks[1]["workspace_path"] = str(tmp_path / "1")
+    db_connection_mock.tasks[1]["target_repo"] = "example/project"
+    db_connection_mock.tasks[1]["target_ref"] = "main"
+    db_connection_mock.tasks[1]["working_branch"] = "mn2/1/phase0"
+    db_connection_mock.tasks[1]["payload_json"] = {
+        "task": "README を更新",
+        "instruction": "README に現在時刻を記載する",
+    }
+
+    engine = WorkerEngine(
+        db_connection_mock,
+        service_name="brain",
+        worker_name="worker-brain-1",
+        git_command_runner=fake_git_runner,
+        llm_client=RateLimitedLLMClient(),
+        workspace_root=tmp_path,
+    )
+
+    processed = engine.run_once()
+
+    assert processed is True
+    assert db_connection_mock.tasks[1]["status"] == "blocked"
+    assert any(log["event_type"] == "llm_generation_failed" for log in db_connection_mock.logs)
+
+
+def test_backend_applies_artifact_for_waiting_approval_task_and_marks_succeeded(db_connection_mock, tmp_path):
+    db_connection_mock.tasks[1]["status"] = "waiting_approval"
+    db_connection_mock.tasks[1]["workspace_path"] = str(tmp_path / "1")
+    db_connection_mock.tasks[1]["target_repo"] = "example/project"
+    db_connection_mock.tasks[1]["target_ref"] = "main"
+    db_connection_mock.tasks[1]["working_branch"] = "mn2/1/phase0"
+    db_connection_mock.tasks[1]["result_summary_md"] = "README を更新しました"
+    db_connection_mock.tasks[1]["payload_json"] = {"task": "README を更新"}
+
+    backend = MariaDBTaskBackend(db_connection_mock, workspace_root=tmp_path)
+
+    class FakeRepositoryWorkspace:
+        def apply_artifact(self, **kwargs):
+            assert kwargs["working_branch"] == "mn2/1/phase0"
+            return {
+                "artifact_path": str(tmp_path / "1" / "artifacts" / "llm_response.md"),
+                "patch_path": str(tmp_path / "1" / "patches" / "artifact_apply.patch"),
+                "changed_files": ["README.md"],
+                "commit_sha": "abc1234",
+                "commit_message": "README を更新",
+                "working_branch": "mn2/1/phase0",
+            }
+
+    backend.repository_workspace = FakeRepositoryWorkspace()
+
+    processed = backend.apply_artifact_for_task(1, "brain", "worker-brain-1")
+
+    assert processed is True
+    assert db_connection_mock.tasks[1]["status"] == "succeeded"
+    assert any(log["event_type"] == "artifact_apply_started" for log in db_connection_mock.logs)
+    assert any(log["event_type"] == "artifact_apply_succeeded" and "abc1234" in log["message"] for log in db_connection_mock.logs)
+    assert any(log["event_type"] == "git_push_succeeded" for log in db_connection_mock.logs)
+
+
+def test_backend_blocks_task_when_artifact_apply_fails(db_connection_mock, tmp_path):
+    db_connection_mock.tasks[1]["status"] = "waiting_approval"
+    db_connection_mock.tasks[1]["workspace_path"] = str(tmp_path / "1")
+    db_connection_mock.tasks[1]["target_repo"] = "example/project"
+    db_connection_mock.tasks[1]["target_ref"] = "main"
+    db_connection_mock.tasks[1]["working_branch"] = "mn2/1/phase0"
+    db_connection_mock.tasks[1]["result_summary_md"] = "README を更新しました"
+    db_connection_mock.tasks[1]["payload_json"] = {"task": "README を更新"}
+
+    backend = MariaDBTaskBackend(db_connection_mock, workspace_root=tmp_path)
+
+    class FailingRepositoryWorkspace:
+        def apply_artifact(self, **kwargs):
+            raise ArtifactApplyError("no_diff_section")
+
+    backend.repository_workspace = FailingRepositoryWorkspace()
+
+    processed = backend.apply_artifact_for_task(1, "brain", "worker-brain-1")
+
+    assert processed is True
+    assert db_connection_mock.tasks[1]["status"] == "blocked"
+    assert any(log["event_type"] == "artifact_apply_failed" and "no_diff_section" in log["message"] for log in db_connection_mock.logs)
+
+
+def test_backend_logs_no_changes_when_artifact_apply_produces_no_diff(db_connection_mock, tmp_path):
+    db_connection_mock.tasks[1]["status"] = "waiting_approval"
+    db_connection_mock.tasks[1]["workspace_path"] = str(tmp_path / "1")
+    db_connection_mock.tasks[1]["target_repo"] = "example/project"
+    db_connection_mock.tasks[1]["target_ref"] = "main"
+    db_connection_mock.tasks[1]["working_branch"] = "mn2/1/phase0"
+    db_connection_mock.tasks[1]["result_summary_md"] = "README を更新しました"
+    db_connection_mock.tasks[1]["payload_json"] = {"task": "README を更新"}
+
+    backend = MariaDBTaskBackend(db_connection_mock, workspace_root=tmp_path)
+
+    class NoChangesRepositoryWorkspace:
+        def apply_artifact(self, **kwargs):
+            raise ArtifactApplyError("artifact_apply_no_changes")
+
+    backend.repository_workspace = NoChangesRepositoryWorkspace()
+
+    processed = backend.apply_artifact_for_task(1, "brain", "worker-brain-1")
+
+    assert processed is True
+    assert db_connection_mock.tasks[1]["status"] == "blocked"
+    assert any(log["event_type"] == "artifact_apply_no_changes" for log in db_connection_mock.logs)
+
+
+def test_backend_skips_artifact_apply_when_task_is_not_waiting_approval(db_connection_mock, tmp_path):
+    db_connection_mock.tasks[1]["status"] = "queued"
+    db_connection_mock.tasks[1]["workspace_path"] = str(tmp_path / "1")
+    db_connection_mock.tasks[1]["working_branch"] = "mn2/1/phase0"
+
+    backend = MariaDBTaskBackend(db_connection_mock, workspace_root=tmp_path)
+
+    processed = backend.apply_artifact_for_task(1, "brain", "worker-brain-1")
+
+    assert processed is False
+    assert db_connection_mock.tasks[1]["status"] == "queued"
+    assert any(log["event_type"] == "artifact_apply_skipped" for log in db_connection_mock.logs)
+
+
+def test_worker_blocks_task_when_llm_response_is_empty(db_connection_mock, tmp_path):
+    class EmptyResponseLLMClient:
+        def generate(self, prompt: str, metadata: dict | None = None) -> str:
+            return "   \n"
+
+    def fake_git_runner(args: list[str], cwd: Path) -> None:
+        if args[:2] == ["git", "clone"]:
+            Path(args[-1]).mkdir(parents=True, exist_ok=True)
+
+    db_connection_mock.tasks[1]["workspace_path"] = str(tmp_path / "1")
+    db_connection_mock.tasks[1]["target_repo"] = "example/project"
+    db_connection_mock.tasks[1]["target_ref"] = "main"
+    db_connection_mock.tasks[1]["working_branch"] = "mn2/1/phase0"
+    db_connection_mock.tasks[1]["payload_json"] = {
+        "task": "README を更新",
+        "instruction": "README に現在時刻を記載する",
+    }
+
+    engine = WorkerEngine(
+        db_connection_mock,
+        service_name="brain",
+        worker_name="worker-brain-1",
+        git_command_runner=fake_git_runner,
+        llm_client=EmptyResponseLLMClient(),
+        workspace_root=tmp_path,
+    )
+
+    processed = engine.run_once()
+
+    assert processed is True
+    assert db_connection_mock.tasks[1]["status"] == "blocked"
+    assert any(log["event_type"] == "llm_generation_failed" for log in db_connection_mock.logs)
+
+
+def test_worker_blocks_task_when_llm_response_exceeds_size_limit(db_connection_mock, tmp_path, monkeypatch):
+    class HugeResponseLLMClient:
+        def generate(self, prompt: str, metadata: dict | None = None) -> str:
+            return "x" * 80
+
+    def fake_git_runner(args: list[str], cwd: Path) -> None:
+        if args[:2] == ["git", "clone"]:
+            Path(args[-1]).mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setenv("LLM_MAX_RESPONSE_BYTES", "32")
+    db_connection_mock.tasks[1]["workspace_path"] = str(tmp_path / "1")
+    db_connection_mock.tasks[1]["target_repo"] = "example/project"
+    db_connection_mock.tasks[1]["target_ref"] = "main"
+    db_connection_mock.tasks[1]["working_branch"] = "mn2/1/phase0"
+    db_connection_mock.tasks[1]["payload_json"] = {
+        "task": "README を更新",
+        "instruction": "README に現在時刻を記載する",
+    }
+
+    engine = WorkerEngine(
+        db_connection_mock,
+        service_name="brain",
+        worker_name="worker-brain-1",
+        git_command_runner=fake_git_runner,
+        llm_client=HugeResponseLLMClient(),
+        workspace_root=tmp_path,
+    )
+
+    processed = engine.run_once()
+
+    assert processed is True
+    assert db_connection_mock.tasks[1]["status"] == "blocked"
+    assert any(log["event_type"] == "llm_generation_failed" for log in db_connection_mock.logs)
+
+
+def test_worker_masks_github_token_from_saved_artifact(db_connection_mock, tmp_path, monkeypatch):
+    class TokenEchoLLMClient:
+        def generate(self, prompt: str, metadata: dict | None = None) -> str:
+            return "token=ghs_secret_token_value"
+
+    def fake_git_runner(args: list[str], cwd: Path) -> None:
+        if args[:2] == ["git", "clone"]:
+            Path(args[-1]).mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setenv("GITHUB_TOKEN", "ghs_secret_token_value")
+    db_connection_mock.tasks[1]["workspace_path"] = str(tmp_path / "1")
+    db_connection_mock.tasks[1]["target_repo"] = "example/project"
+    db_connection_mock.tasks[1]["target_ref"] = "main"
+    db_connection_mock.tasks[1]["working_branch"] = "mn2/1/phase0"
+    db_connection_mock.tasks[1]["payload_json"] = {
+        "task": "README を更新",
+        "instruction": "README に現在時刻を記載する",
+    }
+
+    engine = WorkerEngine(
+        db_connection_mock,
+        service_name="brain",
+        worker_name="worker-brain-1",
+        git_command_runner=fake_git_runner,
+        llm_client=TokenEchoLLMClient(),
+        workspace_root=tmp_path,
+    )
+
+    processed = engine.run_once()
+
+    artifact_path = tmp_path / "1" / "artifacts" / "llm_response.md"
+    assert processed is True
+    assert db_connection_mock.tasks[1]["status"] == "waiting_approval"
+    assert "ghs_secret_token_value" not in artifact_path.read_text(encoding="utf-8")
+

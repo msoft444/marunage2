@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from .contracts import ContractValidationError, ModelContractCodec
 from .database import LeaseConflictError, MariaDBAccessor, TaskConsistencyError
-from .repository_workspace import RepositoryPreparationError, RepositoryWorkspaceManager
+from .llm_client import (
+    LLMAuthenticationError,
+    LLMClient,
+    LLMConfigurationError,
+    LLMEmptyResponseError,
+    LLMRateLimitError,
+    LLMServiceError,
+    LLMTimeoutError,
+)
+from .repository_workspace import ArtifactApplyError, RepositoryPreparationError, RepositoryWorkspaceManager
 from .state_machine import TaskStateMachine
 
 
@@ -14,6 +24,7 @@ from .state_machine import TaskStateMachine
 class MariaDBTaskBackend:
     connection: object
     git_command_runner: Callable[[list[str], Path], None] | None = None
+    llm_client: Any | None = None
     workspace_root: str | Path = "/workspace"
 
     def __post_init__(self) -> None:
@@ -94,7 +105,8 @@ class MariaDBTaskBackend:
                 "Task processing started",
                 worker_name,
             )
-            if task.target_repo and task.workspace_path and task.working_branch:
+            normalized_workspace_path = None
+            if task.workspace_path:
                 try:
                     normalized_workspace_path = self.db.normalize_task_workspace_path(task.workspace_path)
                 except TaskConsistencyError as error:
@@ -110,6 +122,8 @@ class MariaDBTaskBackend:
                         worker_name,
                     )
                     return True
+
+            if task.target_repo and normalized_workspace_path and task.working_branch:
                 try:
                     prepared_paths = self.repository_workspace.prepare_repository(
                         workspace_path=normalized_workspace_path,
@@ -147,10 +161,139 @@ class MariaDBTaskBackend:
                     "Phase 0-5 execution flow initialized",
                     worker_name,
                 )
+
+            instruction = self._extract_instruction(task.payload_json)
+            if isinstance(task.payload_json, dict) and instruction is None:
+                blocked = self.db.update_task_status(task.id, "running", "blocked")
+                if not blocked:
+                    raise TaskConsistencyError(f"task {task.id} could not be blocked after invalid instruction")
+                self.db.insert_log(
+                    task.id,
+                    task.root_task_id,
+                    service_name,
+                    "invalid_instruction",
+                    "Invalid instruction: payload_json.instruction is required",
+                    worker_name,
+                )
+                return True
+            if instruction:
+                return self._generate_task_result(task, service_name, worker_name, instruction, normalized_workspace_path)
             return True
 
     def task_working_directory(self, task_id: int) -> str | None:
         return self.db.select_task_workspace_path(task_id)
+
+    def apply_artifact_for_task(self, task_id: int, service_name: str, worker_name: str) -> bool:
+        with self.db.transaction():
+            task = self.db.select_task_for_artifact_apply(task_id)
+            if task.status != "waiting_approval":
+                self.db.insert_log(
+                    task.id,
+                    task.root_task_id,
+                    service_name,
+                    "artifact_apply_skipped",
+                    f"Task {task.id} is not waiting_approval",
+                    worker_name,
+                )
+                return False
+
+            try:
+                normalized_workspace_path = self.db.normalize_task_workspace_path(task.workspace_path)
+            except TaskConsistencyError as error:
+                blocked = self.db.update_task_status(task.id, "waiting_approval", "blocked")
+                if not blocked:
+                    raise TaskConsistencyError(f"task {task.id} could not be blocked after invalid workspace path")
+                self.db.insert_log(
+                    task.id,
+                    task.root_task_id,
+                    service_name,
+                    "invalid_workspace_path",
+                    f"Invalid workspace path: {error}",
+                    worker_name,
+                )
+                return True
+
+            if not normalized_workspace_path or not task.working_branch:
+                blocked = self.db.update_task_status(task.id, "waiting_approval", "blocked")
+                if not blocked:
+                    raise TaskConsistencyError(f"task {task.id} could not be blocked after invalid artifact apply prerequisites")
+                self.db.insert_log(
+                    task.id,
+                    task.root_task_id,
+                    service_name,
+                    "artifact_apply_failed",
+                    "Artifact apply failed: workspace_path and working_branch are required",
+                    worker_name,
+                )
+                return True
+
+            started = self.db.update_task_status(task.id, "waiting_approval", "running")
+            if not started:
+                raise TaskConsistencyError(f"task {task.id} could not transition from waiting_approval to running")
+            self.db.insert_log(
+                task.id,
+                task.root_task_id,
+                service_name,
+                "artifact_apply_started",
+                "Artifact apply started",
+                worker_name,
+            )
+
+            task_title = None
+            if isinstance(task.payload_json, dict) and isinstance(task.payload_json.get("task"), str):
+                task_title = task.payload_json["task"].strip()
+
+            try:
+                apply_result = self.repository_workspace.apply_artifact(
+                    workspace_path=normalized_workspace_path,
+                    working_branch=task.working_branch,
+                    task_title=task_title,
+                    result_summary_md=task.result_summary_md,
+                )
+            except ArtifactApplyError as error:
+                blocked = self.db.update_task_status(task.id, "running", "blocked")
+                if not blocked:
+                    raise TaskConsistencyError(f"task {task.id} could not be blocked after artifact apply failure")
+                event_type = "artifact_apply_failed"
+                message = f"Artifact apply failed: {error}"
+                if str(error) == "artifact_apply_no_changes":
+                    event_type = "artifact_apply_no_changes"
+                    message = "Artifact apply produced no changes"
+                self.db.insert_log(
+                    task.id,
+                    task.root_task_id,
+                    service_name,
+                    event_type,
+                    message,
+                    worker_name,
+                )
+                return True
+
+            completed = self.db.update_task_result(
+                task.id,
+                "running",
+                "succeeded",
+                task.result_summary_md or apply_result["commit_message"],
+            )
+            if not completed:
+                raise TaskConsistencyError(f"task {task.id} could not be updated after artifact apply")
+            self.db.insert_log(
+                task.id,
+                task.root_task_id,
+                service_name,
+                "artifact_apply_succeeded",
+                f"Applied artifact and created commit {apply_result['commit_sha']}",
+                worker_name,
+            )
+            self.db.insert_log(
+                task.id,
+                task.root_task_id,
+                service_name,
+                "git_push_succeeded",
+                f"Pushed {apply_result['working_branch']} to origin",
+                worker_name,
+            )
+            return True
 
     def recover_expired_tasks(self, service_name: str, worker_name: str) -> list[int]:
         with self.db.transaction():
@@ -237,3 +380,138 @@ class MariaDBTaskBackend:
 
     def blue_green_capacity(self) -> dict:
         return {"db_pool_exhausted": False, "delayed": True}
+
+    def _generate_task_result(
+        self,
+        task,
+        service_name: str,
+        worker_name: str,
+        instruction: str,
+        workspace_path: str | None,
+    ) -> bool:
+        try:
+            prompt = self._build_prompt(task, instruction)
+            self.db.insert_log(
+                task.id,
+                task.root_task_id,
+                service_name,
+                "llm_generation_started",
+                "LLM generation started",
+                worker_name,
+            )
+            response = self._get_llm_client().generate(
+                prompt,
+                metadata={
+                    "task_id": task.id,
+                    "root_task_id": task.root_task_id,
+                    "target_repo": task.target_repo,
+                    "working_branch": task.working_branch,
+                    "workspace_path": workspace_path,
+                },
+            )
+            sanitized_response = self._sanitize_response(response)
+            self._validate_response_size(sanitized_response)
+            summary = self._build_result_summary(sanitized_response)
+            artifact_path = self._write_llm_artifact(workspace_path, sanitized_response)
+        except (
+            LLMAuthenticationError,
+            LLMConfigurationError,
+            LLMEmptyResponseError,
+            LLMRateLimitError,
+            LLMServiceError,
+            LLMTimeoutError,
+            OSError,
+            ValueError,
+        ) as error:
+            blocked = self.db.update_task_status(task.id, "running", "blocked")
+            if not blocked:
+                raise TaskConsistencyError(f"task {task.id} could not be blocked after llm failure")
+            self.db.insert_log(
+                task.id,
+                task.root_task_id,
+                service_name,
+                "llm_generation_failed",
+                f"LLM generation failed: {error}",
+                worker_name,
+            )
+            return True
+
+        completed = self.db.update_task_result(task.id, "running", "waiting_approval", summary)
+        if not completed:
+            raise TaskConsistencyError(f"task {task.id} could not be updated after llm success")
+        self.db.insert_log(
+            task.id,
+            task.root_task_id,
+            service_name,
+            "llm_generation_succeeded",
+            f"LLM response saved to {artifact_path}",
+            worker_name,
+        )
+        return True
+
+    def _get_llm_client(self):
+        if self.llm_client is None:
+            self.llm_client = LLMClient.from_environment()
+        return self.llm_client
+
+    @staticmethod
+    def _extract_instruction(payload_json: dict[str, Any] | None) -> str | None:
+        if not isinstance(payload_json, dict):
+            return None
+        instruction = payload_json.get("instruction")
+        if not isinstance(instruction, str):
+            return None
+        stripped = instruction.strip()
+        return stripped or None
+
+    @staticmethod
+    def _build_prompt(task, instruction: str) -> str:
+        prompt_parts = [
+            "You are generating a proposal artifact only.",
+            "Do not edit files.",
+            "Do not run git push.",
+            "Do not run commands that modify the repository.",
+            "Return only the proposed content or patch in markdown.",
+        ]
+        if isinstance(task.payload_json, dict) and isinstance(task.payload_json.get("task"), str):
+            prompt_parts.append(f"Task: {task.payload_json['task'].strip()}")
+        if task.target_repo:
+            prompt_parts.append(f"Repository: {task.target_repo}")
+        if task.working_branch:
+            prompt_parts.append(f"Working branch: {task.working_branch}")
+        prompt_parts.append("Instruction:")
+        prompt_parts.append(instruction)
+        return "\n\n".join(prompt_parts)
+
+    @staticmethod
+    def _build_result_summary(response: str) -> str:
+        lines = [line.strip() for line in response.splitlines() if line.strip()]
+        if not lines:
+            raise LLMEmptyResponseError("empty LLM response")
+        return lines[0][:200]
+
+    @staticmethod
+    def _sanitize_response(response: str) -> str:
+        sanitized = response
+        for env_var in ("GITHUB_TOKEN", "GH_TOKEN", "COPILOT_GITHUB_TOKEN"):
+            secret = os.getenv(env_var, "").strip()
+            if secret:
+                sanitized = sanitized.replace(secret, "[MASKED_GITHUB_TOKEN]")
+        return sanitized
+
+    @staticmethod
+    def _validate_response_size(response: str) -> None:
+        max_response_bytes = int(os.getenv("LLM_MAX_RESPONSE_BYTES", "131072"))
+        response_size = len(response.encode("utf-8"))
+        if response_size > max_response_bytes:
+            raise ValueError(f"LLM response exceeded size limit: {response_size} > {max_response_bytes}")
+
+    @staticmethod
+    def _write_llm_artifact(workspace_path: str | None, response: str) -> str:
+        if not workspace_path:
+            raise ValueError("workspace_path is required for LLM artifact persistence")
+        artifacts_dir = Path(workspace_path) / "artifacts"
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        artifact_path = artifacts_dir / "llm_response.md"
+        artifact_path.write_text(response, encoding="utf-8")
+        return str(artifact_path)

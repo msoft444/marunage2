@@ -71,6 +71,8 @@ class FakeMariaDBConnection:
                 "target_repo": None,
                 "target_ref": None,
                 "working_branch": None,
+                "payload_json": None,
+                "result_summary_md": None,
                 "started_at": None,
             },
             2: {
@@ -85,6 +87,8 @@ class FakeMariaDBConnection:
                 "target_repo": None,
                 "target_ref": None,
                 "working_branch": None,
+                "payload_json": None,
+                "result_summary_md": None,
                 "started_at": None,
             },
             3: {
@@ -99,6 +103,8 @@ class FakeMariaDBConnection:
                 "target_repo": None,
                 "target_ref": None,
                 "working_branch": None,
+                "payload_json": None,
+                "result_summary_md": None,
                 "started_at": None,
             },
         }
@@ -132,12 +138,25 @@ class FakeMariaDBConnection:
             task = None
             selected = self.tasks.get(params[0])
             if selected is not None:
-                task = {
-                    "id": selected["id"],
-                    "status": selected["status"],
-                    "lease_owner": selected["lease_owner"],
-                    "lease_expires_at": selected["lease_expires_at"],
-                }
+                if normalized.startswith("SELECT id, root_task_id, status, payload_json, workspace_path, target_repo, target_ref, working_branch, result_summary_md FROM tasks WHERE id = %s FOR UPDATE"):
+                    task = {
+                        "id": selected["id"],
+                        "root_task_id": selected["root_task_id"],
+                        "status": selected["status"],
+                        "payload_json": selected.get("payload_json"),
+                        "workspace_path": selected.get("workspace_path"),
+                        "target_repo": selected.get("target_repo"),
+                        "target_ref": selected.get("target_ref"),
+                        "working_branch": selected.get("working_branch"),
+                        "result_summary_md": selected.get("result_summary_md"),
+                    }
+                else:
+                    task = {
+                        "id": selected["id"],
+                        "status": selected["status"],
+                        "lease_owner": selected["lease_owner"],
+                        "lease_expires_at": selected["lease_expires_at"],
+                    }
             return FakeCursor([task] if task else [], 1 if task else 0)
         if normalized == "SELECT workspace_path, target_repo FROM tasks WHERE id = %s":
             selected = self.tasks.get(params[0])
@@ -159,6 +178,7 @@ class FakeMariaDBConnection:
                     "status": selected["status"],
                     "assigned_service": selected["assigned_service"],
                     "priority": selected["priority"],
+                    "payload_json": selected.get("payload_json"),
                     "workspace_path": selected.get("workspace_path"),
                     "target_repo": selected.get("target_repo"),
                     "target_ref": selected.get("target_ref"),
@@ -265,6 +285,15 @@ class FakeMariaDBConnection:
             if task["status"] != current_status:
                 return FakeCursor([], 0)
             task["status"] = new_status
+            return FakeCursor([], 1)
+        if normalized.startswith("UPDATE tasks SET status = %s, result_summary_md = %s, finished_at = CURRENT_TIMESTAMP WHERE id = %s AND status = %s"):
+            new_status, result_summary_md, task_id, current_status = params
+            task = self.tasks[task_id]
+            if task["status"] != current_status:
+                return FakeCursor([], 0)
+            task["status"] = new_status
+            task["result_summary_md"] = result_summary_md
+            task["finished_at"] = "now"
             return FakeCursor([], 1)
         if normalized.startswith("UPDATE tasks SET status = 'running', started_at = CURRENT_TIMESTAMP WHERE id = %s AND status = 'leased' AND lease_owner = %s"):
             task_id, lease_owner = params

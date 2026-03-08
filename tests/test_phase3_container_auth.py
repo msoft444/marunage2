@@ -23,6 +23,14 @@ def test_phase3_compose_uses_github_token_for_all_app_services_without_legacy_au
     assert content.count("GITHUB_TOKEN:") >= 4
 
 
+def test_runtime_dockerfile_installs_copilot_cli_without_gh_cli():
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "gh.io/copilot-install" in dockerfile
+    assert "copilot help" in dockerfile or "command -v copilot" in dockerfile
+    assert "gh-copilot" not in dockerfile
+
+
 def test_phase3_init_runtime_stops_requesting_github_token_secret_file():
     content = INIT_RUNTIME.read_text(encoding="utf-8")
 
@@ -89,6 +97,33 @@ def test_entrypoint_no_longer_requires_copilot_mount_variables_for_brain():
     assert "GITHUB_TOKEN" in result.stderr
     assert "COPILOT_CONFIG_DIR" not in result.stderr
     assert "COPILOT_API_KEY" not in result.stderr
+
+
+def test_entrypoint_brain_requires_copilot_command_when_github_token_is_present():
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "DB_HOST": "localhost",
+        "DB_PORT": "3306",
+        "DB_NAME": "marunage2",
+        "DB_USER": "marunage",
+        "DB_PASSWORD": "dummy",
+        "TARGET_REPO": "msoft444/marunage2",
+        "TARGET_REF": "main",
+        "GITHUB_TOKEN": "token-123",
+        "REQUIRED_ENV_VARS": "DB_HOST,DB_PORT,DB_NAME,DB_USER,DB_PASSWORD",
+    }
+
+    result = subprocess.run(
+        ["bash", str(ENTRYPOINT), "python", "scripts/service_runner.py", "brain"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "copilot" in result.stderr
+    assert "not installed" in result.stderr
 
 
 def test_entrypoint_no_longer_requires_copilot_mount_variables_for_guardian():

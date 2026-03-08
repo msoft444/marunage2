@@ -29,6 +29,8 @@ RUN pip install --upgrade pip setuptools wheel \
 
 FROM python:3.11-slim-bookworm AS runtime
 
+ARG COPILOT_CLI_VERSION=latest
+
 ENV PATH="/opt/venv/bin:${PATH}" \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -38,9 +40,13 @@ ENV PATH="/opt/venv/bin:${PATH}" \
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
+        curl \
         git \
         libmariadb3 \
         tini \
+    && curl -fsSL https://gh.io/copilot-install | VERSION="${COPILOT_CLI_VERSION}" PREFIX=/usr/local bash \
+    && command -v copilot >/dev/null 2>&1 \
+    && copilot help >/dev/null \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system marunage \
     && useradd --system --gid marunage --create-home --home-dir /home/marunage marunage

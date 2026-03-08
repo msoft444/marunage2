@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +32,7 @@ class QueueTaskRow:
     status: str
     assigned_service: str
     priority: int
+    payload_json: dict[str, Any] | None = None
     workspace_path: str | None = None
     target_repo: str | None = None
     target_ref: str | None = None
@@ -41,6 +43,19 @@ class QueueTaskRow:
 class RecoverableTaskRow:
     id: int
     root_task_id: int
+
+
+@dataclass(frozen=True)
+class ArtifactApplyTaskRow:
+    id: int
+    root_task_id: int
+    status: str
+    payload_json: dict[str, Any] | None = None
+    workspace_path: str | None = None
+    target_repo: str | None = None
+    target_ref: str | None = None
+    working_branch: str | None = None
+    result_summary_md: str | None = None
 
 
 class MariaDBAccessor:
@@ -104,9 +119,17 @@ class MariaDBAccessor:
         cursor = self._execute(query, (new_status, task_id, current_status))
         return bool(cursor.rowcount)
 
+    def update_task_result(self, task_id: int, current_status: str, new_status: str, result_summary_md: str) -> bool:
+        query = (
+            "UPDATE tasks SET status = %s, result_summary_md = %s, finished_at = CURRENT_TIMESTAMP "
+            "WHERE id = %s AND status = %s"
+        )
+        cursor = self._execute(query, (new_status, result_summary_md, task_id, current_status))
+        return bool(cursor.rowcount)
+
     def select_next_queued_task(self, service_name: str) -> QueueTaskRow | None:
         query = (
-            "SELECT id, root_task_id, status, assigned_service, priority, workspace_path, target_repo, target_ref, working_branch "
+            "SELECT id, root_task_id, status, assigned_service, priority, payload_json, workspace_path, target_repo, target_ref, working_branch "
             "FROM tasks WHERE assigned_service = %s AND status = 'queued' "
             "ORDER BY priority DESC, created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED"
         )
@@ -114,6 +137,9 @@ class MariaDBAccessor:
         row = self._fetchone_dict(cursor)
         if row is None:
             return None
+        payload_json = row.get("payload_json")
+        if isinstance(payload_json, str):
+            row["payload_json"] = json.loads(payload_json)
         return QueueTaskRow(**row)
 
     def select_task_workspace_path(self, task_id: int) -> str | None:
@@ -123,6 +149,20 @@ class MariaDBAccessor:
         if row is None:
             raise TaskConsistencyError(f"task {task_id} does not exist")
         return self.normalize_task_workspace_path(row.get("workspace_path"), row.get("target_repo"))
+
+    def select_task_for_artifact_apply(self, task_id: int) -> ArtifactApplyTaskRow:
+        query = (
+            "SELECT id, root_task_id, status, payload_json, workspace_path, target_repo, target_ref, working_branch, result_summary_md "
+            "FROM tasks WHERE id = %s FOR UPDATE"
+        )
+        cursor = self._execute(query, (task_id,))
+        row = self._fetchone_dict(cursor)
+        if row is None:
+            raise TaskConsistencyError(f"task {task_id} does not exist")
+        payload_json = row.get("payload_json")
+        if isinstance(payload_json, str):
+            row["payload_json"] = json.loads(payload_json)
+        return ArtifactApplyTaskRow(**row)
 
     def normalize_task_workspace_path(self, workspace_path: str | None, target_repo: str | None = None) -> str | None:
         if workspace_path is None:

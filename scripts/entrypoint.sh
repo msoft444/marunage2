@@ -49,6 +49,10 @@ case "$service_name" in
     append_missing_var TARGET_REPO
     append_missing_var TARGET_REF
     append_missing_var GITHUB_TOKEN
+    if ! command -v copilot >/dev/null 2>&1; then
+      echo "refusing to start: copilot command is not installed" >&2
+      exit 1
+    fi
     ;;
   guardian)
     append_missing_var GITHUB_TOKEN

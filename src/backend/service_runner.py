@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from .database import TaskConsistencyError
 from .task_backend import MariaDBTaskBackend
@@ -19,6 +19,7 @@ class WorkerEngine:
     worker_name: str
     connection_factory: Callable[[], object] | None = None
     git_command_runner: Callable[[list[str], Path], None] | None = None
+    llm_client: Any | None = None
     workspace_root: str | Path = "/workspace"
 
     def __post_init__(self) -> None:
@@ -29,6 +30,7 @@ class WorkerEngine:
         self.task_backend = MariaDBTaskBackend(
             connection,
             git_command_runner=self.git_command_runner,
+            llm_client=self.llm_client,
             workspace_root=self.workspace_root,
         )
 
