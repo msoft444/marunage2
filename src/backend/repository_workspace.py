@@ -26,10 +26,13 @@ class RepositoryWorkspaceManager:
         docs_snapshot_path = workspace_root / "system_docs_snapshot"
         patches_path = workspace_root / "patches"
 
-        workspace_root.mkdir(parents=True, exist_ok=True)
-        artifacts_path.mkdir(parents=True, exist_ok=True)
-        docs_snapshot_path.mkdir(parents=True, exist_ok=True)
-        patches_path.mkdir(parents=True, exist_ok=True)
+        try:
+            workspace_root.mkdir(parents=True, exist_ok=True)
+            artifacts_path.mkdir(parents=True, exist_ok=True)
+            docs_snapshot_path.mkdir(parents=True, exist_ok=True)
+            patches_path.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise RepositoryPreparationError(f"workspace directory setup failed: {error}") from error
 
         clone_url = f"https://github.com/{target_repo}.git"
         if not repo_path.exists():

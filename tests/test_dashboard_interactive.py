@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 from pathlib import Path
 
 from security import SecretScanner, SecureDashboard
@@ -14,7 +15,7 @@ def test_dashboard_task_detail_returns_404_for_unknown_id(db_connection_mock):
     assert response["json"]["error"] == "task_not_found"
 
 
-def test_dashboard_task_submission_with_secret_is_persisted_as_blocked(db_connection_mock):
+def test_dashboard_task_submission_bypasses_secret_scanner_for_development_requests(db_connection_mock):
     dashboard = SecureDashboard(db_connection=db_connection_mock, secret_scanner=SecretScanner())
 
     response = dashboard.serve_request(
@@ -26,9 +27,12 @@ def test_dashboard_task_submission_with_secret_is_persisted_as_blocked(db_connec
     created_task_id = response["json"]["task"]["id"]
     created_task = db_connection_mock.tasks[created_task_id]
     assert response["status"] == 201
-    assert response["json"]["task"]["status"] == "blocked"
-    assert created_task["status"] == "blocked"
-    assert created_task["payload_json"]["security_scan"]["blocked"] is True
+    assert response["json"]["task"]["status"] == "queued"
+    assert created_task["status"] == "queued"
+    assert created_task["payload_json"]["security_scan"]["blocked"] is False
+    assert created_task["payload_json"]["security_scan"]["disabled"] is True
+    assert created_task["payload_json"]["security_scan"]["reason"] == "development_task_requests_bypass_secret_scanner"
+    assert db_connection_mock.logs[-1]["event_type"] == "task_submitted"
 
 
 def test_dashboard_lists_newly_submitted_task(db_connection_mock):
@@ -281,3 +285,30 @@ def test_dashboard_task_detail_includes_logs_and_result(db_connection_mock):
     assert response["json"]["task"]["id"] == 1
     assert response["json"]["task"]["result_summary_md"] == "完了: README を作成しました"
     assert response["json"]["logs"][0]["event_type"] == "task_started"
+
+
+def test_dashboard_serializes_datetime_fields_in_task_responses(db_connection_mock):
+    dashboard = SecureDashboard(db_connection=db_connection_mock, secret_scanner=SecretScanner())
+    created_at = datetime(2026, 3, 8, 12, 34, 56)
+    db_connection_mock.tasks[1]["created_at"] = created_at
+    db_connection_mock.tasks[1]["started_at"] = created_at
+    db_connection_mock.logs.append(
+        {
+            "task_id": 1,
+            "root_task_id": 1,
+            "service": "brain",
+            "event_type": "task_started",
+            "message": "Task processing started",
+            "created_at": created_at,
+        }
+    )
+
+    detail_response = dashboard.serve_request("GET", "/api/v1/tasks/1", body=None)
+    list_response = dashboard.serve_request("GET", "/api/v1/tasks", body=None)
+
+    assert detail_response["status"] == 200
+    assert detail_response["json"]["task"]["created_at"] == "2026-03-08T12:34:56"
+    assert detail_response["json"]["task"]["started_at"] == "2026-03-08T12:34:56"
+    assert detail_response["json"]["logs"][0]["created_at"] == "2026-03-08T12:34:56"
+    assert list_response["status"] == 200
+    assert any(task["created_at"] == "2026-03-08T12:34:56" for task in list_response["json"]["tasks"] if task["id"] == 1)

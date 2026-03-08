@@ -38,6 +38,7 @@ ENV PATH="/opt/venv/bin:${PATH}" \
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
+        git \
         libmariadb3 \
         tini \
     && rm -rf /var/lib/apt/lists/* \
