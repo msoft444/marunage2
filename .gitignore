@@ -17,4 +17,5 @@ docker-compose.override.yml
 .tdd_protocol.md
 
 .todo/
-.workspace/
+workspace/
+!workspace/.gitkeep
