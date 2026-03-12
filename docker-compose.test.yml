@@ -1,3 +1,5 @@
+name: marunage2-test
+
 services:
   mariadb:
     image: mariadb:11.8

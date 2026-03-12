@@ -6,9 +6,12 @@ from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import nh3
+
+from backend.database import MariaDBAccessor, TaskConsistencyError
+from backend.repository_workspace import CommitPushError, RepositoryWorkspaceManager
 
 from .secret_scanner import SecretScanner
 from .sandbox import WorkspaceSandbox
@@ -32,6 +35,7 @@ class SecureDashboard:
         connection_factory: Callable[[], Any] | None = None,
         secret_scanner: SecretScanner | None = None,
         workspace_root: Path | str | None = None,
+        repository_workspace_manager: RepositoryWorkspaceManager | None = None,
     ):
         self.asset_root = asset_root or Path(__file__).resolve().parent / "static"
         self.db_connection = db_connection
@@ -39,6 +43,7 @@ class SecureDashboard:
         self.secret_scanner = secret_scanner or SecretScanner()
         self.workspace_root = Path(workspace_root).resolve(strict=False) if workspace_root else Path.cwd().resolve(strict=False)
         self.sandbox = WorkspaceSandbox(str(self.workspace_root))
+        self.repository_workspace = repository_workspace_manager or RepositoryWorkspaceManager()
         self._banned_repository_roots = tuple(
             Path(path).resolve(strict=False) for path in ("/", "/etc", "/bin", "/sbin", "/usr", "/var", "/private", "/dev", "/System")
         )
@@ -60,9 +65,16 @@ class SecureDashboard:
     def serve_path(self, request_path: str) -> dict:
         return self.serve_request("GET", request_path, body=None)
 
-    def serve_request(self, method: str, request_path: str, body: str | None) -> dict:
+    def serve_request(
+        self,
+        method: str,
+        request_path: str,
+        body: str | None,
+        headers: dict[str, str] | None = None,
+    ) -> dict:
         parsed = urlparse(request_path or "/")
         path = posixpath.normpath(parsed.path or "/")
+        query = parse_qs(parsed.query, keep_blank_values=True)
         method = method.upper()
 
         # Static UI must win over the generic API handler for `/` and `/index.html`.
@@ -74,11 +86,18 @@ class SecureDashboard:
             return self._serve_asset(relative_path)
 
         if path.startswith("/api/v1/"):
-            return self._handle_api(method, path, body)
+            return self._handle_api(method, path, body, query, headers or {})
 
         return self._json_response(404, {"error": "not_found", "path": path})
 
-    def _handle_api(self, method: str, path: str, body: str | None) -> dict:
+    def _handle_api(
+        self,
+        method: str,
+        path: str,
+        body: str | None,
+        query: dict[str, list[str]],
+        headers: dict[str, str],
+    ) -> dict:
         if method == "GET" and path == "/api/v1/health":
             payload = {
                 "service": "dashboard",
@@ -94,13 +113,34 @@ class SecureDashboard:
                 return self._create_task(body)
             return self._json_response(405, {"error": "method_not_allowed", "path": path, "method": method})
 
-        if path.startswith("/api/v1/tasks/"):
-            task_id = self._parse_task_id(path)
-            if task_id is None:
-                return self._json_response(404, {"error": "task_not_found", "path": path})
+        if path == "/api/v1/repositories/branches":
             if method != "GET":
                 return self._json_response(405, {"error": "method_not_allowed", "path": path, "method": method})
-            return self._get_task_detail(task_id)
+            repository_url = (query.get("repository_url") or [""])[0]
+            return self._get_repository_branches(repository_url)
+
+        if path.startswith("/api/v1/tasks/"):
+            route = self._parse_task_route(path)
+            if route is None:
+                return self._json_response(404, {"error": "task_not_found", "path": path})
+            task_id, action = route
+            if action is None:
+                if method != "GET":
+                    return self._json_response(405, {"error": "method_not_allowed", "path": path, "method": method})
+                return self._get_task_detail(task_id)
+            if action == "diff":
+                if method != "GET":
+                    return self._json_response(405, {"error": "method_not_allowed", "path": path, "method": method})
+                return self._get_task_diff(task_id)
+            if action == "approve":
+                if method != "POST":
+                    return self._json_response(405, {"error": "method_not_allowed", "path": path, "method": method})
+                return self._approve_task(task_id, body, headers)
+            if action == "reject":
+                if method != "POST":
+                    return self._json_response(405, {"error": "method_not_allowed", "path": path, "method": method})
+                return self._reject_task(task_id, body, headers)
+            return self._json_response(404, {"error": "task_not_found", "path": path})
 
         return self._json_response(404, {"error": "not_found", "path": path})
 
@@ -125,6 +165,8 @@ class SecureDashboard:
             request_payload.get("target_ref"),
         )
         if request_payload.get("repository_path") and repository_context is None:
+            if self._normalize_github_repository_url(request_payload.get("repository_path")) is not None:
+                return self._json_response(400, {"error": "invalid_target_ref"})
             return self._json_response(400, {"error": "invalid_repository_path"})
         default_phase = 0 if repository_context and repository_context["requires_clone"] else 4
         default_task_type = "requirement_session" if repository_context and repository_context["requires_clone"] else "documentation"
@@ -174,7 +216,7 @@ class SecureDashboard:
                     json.dumps(payload_json, ensure_ascii=False),
                     0,
                     3,
-                    False,
+                    bool(repository_context and repository_context["requires_clone"]),
                 ),
             )
             task_id = self._last_insert_id(cursor, connection)
@@ -282,11 +324,186 @@ class SecureDashboard:
                 return None
             return self._serialize_task_row(row)
 
-    def _parse_task_id(self, path: str) -> int | None:
+    def _parse_task_route(self, path: str) -> tuple[int, str | None] | None:
+        parts = [part for part in path.split("/") if part]
+        if len(parts) < 4 or parts[:3] != ["api", "v1", "tasks"]:
+            return None
         try:
-            return int(path.rsplit("/", 1)[1])
+            task_id = int(parts[3])
         except (TypeError, ValueError):
             return None
+        action = parts[4] if len(parts) > 4 else None
+        return task_id, action
+
+    def _get_repository_branches(self, repository_url: str) -> dict:
+        normalized_url = self._normalize_github_repository_url(repository_url)
+        if normalized_url is None:
+            return self._json_response(400, {"error": "invalid_repository_path"})
+        try:
+            branches = self.repository_workspace.list_repository_branches(normalized_url)
+        except CommitPushError as error:
+            return self._json_response(502, {"error": str(error)})
+        default_branch = "main" if "main" in branches else (branches[0] if branches else None)
+        return self._json_response(200, {"branches": branches, "default_branch": default_branch})
+
+    def _get_task_diff(self, task_id: int) -> dict:
+        try:
+            task = self._get_approval_task(task_id)
+        except TaskConsistencyError:
+            return self._json_response(404, {"error": "task_not_found", "task_id": task_id})
+        if not task.target_repo or not task.workspace_path or not task.working_branch:
+            return self._json_response(400, {"error": "approval_not_supported", "task_id": task_id})
+        if not task.target_ref:
+            return self._json_response(400, {"error": "invalid_target_ref", "task_id": task_id})
+        try:
+            diff_text = self.repository_workspace.get_diff(
+                workspace_path=task.workspace_path,
+                working_branch=task.working_branch,
+                merge_target=task.target_ref,
+            )
+        except CommitPushError as error:
+            message = str(error)
+            if message == "working_branch_not_found":
+                return self._json_response(404, {"error": "working_branch_not_found", "task_id": task_id})
+            if message.startswith("merge_target_not_found:"):
+                return self._json_response(404, {"error": "merge_target_not_found", "task_id": task_id})
+            if message == "merge_target_not_allowed":
+                return self._json_response(400, {"error": "merge_target_not_allowed", "task_id": task_id})
+            return self._json_response(502, {"error": message, "task_id": task_id})
+        return self._json_response(200, {"task_id": task_id, "merge_target": task.target_ref, "diff": diff_text})
+
+    def _approve_task(self, task_id: int, body: str | None, headers: dict[str, str]) -> dict:
+        csrf_error = self._validate_state_changing_request(headers)
+        if csrf_error is not None:
+            return csrf_error
+        payload = self._parse_json_dict(body)
+        if payload is None:
+            return self._json_response(400, {"error": "invalid_json"})
+
+        with self._database() as connection:
+            accessor = MariaDBAccessor(connection, workspace_root=self.workspace_root)
+            try:
+                task = accessor.select_task_for_artifact_apply(task_id)
+            except TaskConsistencyError:
+                return self._json_response(404, {"error": "task_not_found", "task_id": task_id})
+            if task.status != "waiting_approval":
+                return self._json_response(409, {"error": "invalid_task_state", "task_id": task_id, "status": task.status})
+            if not task.target_repo or not task.workspace_path or not task.working_branch:
+                return self._json_response(400, {"error": "approval_not_supported", "task_id": task_id})
+            if not task.target_ref:
+                return self._json_response(400, {"error": "invalid_target_ref", "task_id": task_id})
+            try:
+                merge_result = self.repository_workspace.merge_and_cleanup(
+                    workspace_path=task.workspace_path,
+                    working_branch=task.working_branch,
+                    merge_target=task.target_ref,
+                )
+            except CommitPushError as error:
+                message = str(error)
+                if message == "working_branch_not_found":
+                    return self._json_response(404, {"error": "working_branch_not_found", "task_id": task_id})
+                if message == "merge_target_not_allowed":
+                    return self._json_response(400, {"error": "merge_target_not_allowed", "task_id": task_id})
+                if message.startswith("merge_target_not_found:"):
+                    return self._json_response(404, {"error": "merge_target_not_found", "task_id": task_id})
+                blocked = accessor.update_task_status(task.id, "waiting_approval", "blocked")
+                if not blocked:
+                    raise TaskConsistencyError(f"task {task.id} could not be blocked after approval failure")
+                accessor.insert_log(
+                    task.id,
+                    task.root_task_id,
+                    "dashboard",
+                    self._map_approval_error_to_event(message),
+                    f"Approval failed: {message}",
+                    f"dashboard-{task_id}",
+                )
+                commit = getattr(connection, "commit", None)
+                if callable(commit):
+                    commit()
+                return self._json_response(409, {"error": "approval_failed", "task_id": task_id, "details": message})
+            completed = accessor.update_task_result(task.id, "waiting_approval", "succeeded", task.result_summary_md or "")
+            if not completed:
+                raise TaskConsistencyError(f"task {task.id} could not be updated after approval")
+            accessor.insert_log(
+                task.id,
+                task.root_task_id,
+                "dashboard",
+                "task_approved",
+                f"Merged {task.working_branch} into {merge_result['merge_target']}",
+                f"dashboard-{task_id}",
+            )
+            commit = getattr(connection, "commit", None)
+            if callable(commit):
+                commit()
+        return self._json_response(200, {"task": self._load_task(task_id), "merge": merge_result})
+
+    def _reject_task(self, task_id: int, body: str | None, headers: dict[str, str]) -> dict:
+        csrf_error = self._validate_state_changing_request(headers)
+        if csrf_error is not None:
+            return csrf_error
+        payload = self._parse_json_dict(body)
+        if payload is None:
+            return self._json_response(400, {"error": "invalid_json"})
+        reason = str(payload.get("reason") or "rejected by operator")
+
+        with self._database() as connection:
+            accessor = MariaDBAccessor(connection, workspace_root=self.workspace_root)
+            try:
+                task = accessor.select_task_for_artifact_apply(task_id)
+            except TaskConsistencyError:
+                return self._json_response(404, {"error": "task_not_found", "task_id": task_id})
+            if task.status != "waiting_approval":
+                return self._json_response(409, {"error": "invalid_task_state", "task_id": task_id, "status": task.status})
+            blocked = accessor.update_task_status(task.id, "waiting_approval", "blocked")
+            if not blocked:
+                raise TaskConsistencyError(f"task {task.id} could not be rejected")
+            accessor.insert_log(
+                task.id,
+                task.root_task_id,
+                "dashboard",
+                "task_rejected",
+                f"Approval rejected: {reason}",
+                f"dashboard-{task_id}",
+            )
+            commit = getattr(connection, "commit", None)
+            if callable(commit):
+                commit()
+        return self._json_response(200, {"task": self._load_task(task_id), "reason": reason})
+
+    def _get_approval_task(self, task_id: int):
+        with self._database() as connection:
+            accessor = MariaDBAccessor(connection, workspace_root=self.workspace_root)
+            return accessor.select_task_for_artifact_apply(task_id)
+
+    @staticmethod
+    def _parse_json_dict(body: str | None) -> dict[str, Any] | None:
+        try:
+            payload = json.loads(body or "{}")
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        return payload
+
+    def _validate_state_changing_request(self, headers: dict[str, str]) -> dict | None:
+        origin = headers.get("Origin") or headers.get("origin")
+        if origin and urlparse(origin).hostname not in {"localhost", "127.0.0.1"}:
+            return self._json_response(403, {"error": "csrf_origin_denied"})
+        return None
+
+    @staticmethod
+    def _map_approval_error_to_event(message: str) -> str:
+        if message.startswith("merge_conflict:"):
+            return "merge_conflict"
+        if message.startswith("merge_push_rejected:"):
+            return "merge_push_rejected"
+        if message.startswith("branch_cleanup_local_failed:"):
+            return "branch_cleanup_local_failed"
+        if message.startswith("branch_cleanup_remote_failed:"):
+            return "branch_cleanup_remote_failed"
+        if message.startswith("merge_target_not_found:"):
+            return "merge_target_not_found"
+        return "approval_failed"
 
     @contextmanager
     def _database(self):
@@ -398,7 +615,9 @@ class SecureDashboard:
             return None
         return str(resolved)
 
-    def _parse_github_repository_url(self, repository_path: str, target_ref: Any) -> dict[str, Any] | None:
+    def _normalize_github_repository_url(self, repository_path: Any) -> str | None:
+        if not isinstance(repository_path, str):
+            return None
         parsed = urlparse(repository_path)
         if parsed.scheme not in {"http", "https"}:
             return None
@@ -416,14 +635,20 @@ class SecureDashboard:
             return None
         if not self._is_safe_git_identifier(owner) or not self._is_safe_git_identifier(repo_name):
             return None
+        return f"https://github.com/{owner}/{repo_name}.git"
+
+    def _parse_github_repository_url(self, repository_path: str, target_ref: Any) -> dict[str, Any] | None:
+        normalized_url = self._normalize_github_repository_url(repository_path)
+        if normalized_url is None:
+            return None
         normalized_ref = self._validate_target_ref(target_ref)
         if normalized_ref is None:
             return None
-        normalized_url = f"https://github.com/{owner}/{repo_name}.git"
+        target_repo = normalized_url.removeprefix("https://github.com/").removesuffix(".git")
         return {
             "repository_path": normalized_url,
             "workspace_path": None,
-            "target_repo": f"{owner}/{repo_name}",
+            "target_repo": target_repo,
             "target_ref": normalized_ref,
             "working_branch": None,
             "requires_clone": True,
@@ -446,16 +671,19 @@ class SecureDashboard:
 
     def _validate_target_ref(self, target_ref: Any) -> str | None:
         if target_ref in (None, ""):
-            return "main"
+            return None
         if not isinstance(target_ref, str):
             return None
         if not self.sandbox.validate_control_chars(target_ref):
             return None
-        if target_ref.startswith("-"):
+        normalized = target_ref.strip()
+        if not normalized or normalized.startswith("-"):
             return None
-        if not all(char.isalnum() or char in {"-", "_", ".", "/"} for char in target_ref):
+        if not all(char.isalnum() or char in {"-", "_", ".", "/"} for char in normalized):
             return None
-        return target_ref
+        if normalized not in self.repository_workspace.allowed_merge_targets():
+            return None
+        return normalized
 
     def _serve_asset(self, relative_path: str) -> dict:
         if "\x00" in relative_path:

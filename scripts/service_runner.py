@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import signal
@@ -93,6 +94,21 @@ def open_database_connection():
 class DashboardHandler(BaseHTTPRequestHandler):
     dashboard = SecureDashboard()
 
+    def _internal_error_response(self) -> dict[str, str | int]:
+        return {
+            "status": 500,
+            "content_type": "application/json",
+            "body": json.dumps({"error": "internal_server_error"}),
+        }
+
+    def _dispatch_dashboard_request(self, method: str, path: str, body: str | None, headers: dict[str, str] | None = None) -> None:
+        try:
+            response = self.dashboard.serve_request(method, path, body=body, headers=headers)
+        except Exception:
+            LOGGER.exception("dashboard request failed: method=%s path=%s", method, path)
+            response = self._internal_error_response()
+        self._send_dashboard_response(response)
+
     def _send_dashboard_response(self, response: dict) -> None:
         body = response["body"].encode("utf-8")
         self.send_response(response["status"])
@@ -106,8 +122,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:  # noqa: N802
-        response = self.dashboard.serve_request("GET", self.path, body=None)
-        self._send_dashboard_response(response)
+        self._dispatch_dashboard_request("GET", self.path, body=None)
 
     def do_POST(self) -> None:  # noqa: N802
         content_length = int(self.headers.get("Content-Length", "0"))
@@ -115,8 +130,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_error(413, "Payload Too Large")
             return
         raw_body = self.rfile.read(content_length) if content_length > 0 else b""
-        response = self.dashboard.serve_request("POST", self.path, body=raw_body.decode("utf-8"))
-        self._send_dashboard_response(response)
+        request_headers = {key: value for key, value in self.headers.items()}
+        self._dispatch_dashboard_request("POST", self.path, body=raw_body.decode("utf-8"), headers=request_headers)
 
     def log_message(self, format: str, *args) -> None:  # noqa: A003
         LOGGER.info("dashboard request: " + format, *args)

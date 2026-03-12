@@ -55,11 +55,143 @@ function renderTaskDetail(payload) {
     <div><dt>Service</dt><dd>${escapeHtml(payload.task.assigned_service)}</dd></div>
     <div><dt>Type</dt><dd>${escapeHtml(payload.task.task_type)}</dd></div>
     <div><dt>Repository</dt><dd>${escapeHtml(payload.task.repository_path || 'repo 未指定')}</dd></div>
+    <div><dt>Target Branch</dt><dd>${escapeHtml(payload.task.target_ref || '未指定')}</dd></div>
   `;
   logs.innerHTML = payload.logs.length
     ? payload.logs.map((log) => `<li><strong>${escapeHtml(log.service)}</strong> ${escapeHtml(log.event_type)}<br />${escapeHtml(log.message)}</li>`).join('')
     : '<li class="task-empty">ログはまだありません。</li>';
   result.innerHTML = payload.result_html || '<p>結果はまだありません。</p>';
+  void renderApprovalPanel(payload.task);
+}
+
+function hideApprovalPanel(message) {
+  const panel = document.getElementById('task-approval-panel');
+  const approveButton = document.getElementById('task-approve');
+  const rejectButton = document.getElementById('task-reject');
+  const state = document.getElementById('task-approval-state');
+  const diffPreview = document.getElementById('task-diff-preview');
+  if (!panel || !approveButton || !rejectButton || !state || !diffPreview) {
+    return;
+  }
+  approveButton.disabled = true;
+  rejectButton.disabled = true;
+  state.textContent = message || 'マージ済みまたは却下済みのため、承認操作はできません。';
+  diffPreview.textContent = '';
+  panel.hidden = true;
+}
+
+async function loadTaskDetail(taskId) {
+  return fetchJson(`/api/v1/tasks/${taskId}`);
+}
+
+async function renderApprovalPanel(task) {
+  const panel = document.getElementById('task-approval-panel');
+  const approveButton = document.getElementById('task-approve');
+  const rejectButton = document.getElementById('task-reject');
+  const state = document.getElementById('task-approval-state');
+  const diffPreview = document.getElementById('task-diff-preview');
+  if (!panel || !approveButton || !rejectButton || !state || !diffPreview) {
+    return;
+  }
+  if (task.status !== 'waiting_approval') {
+    hideApprovalPanel();
+    return;
+  }
+
+  panel.hidden = false;
+  approveButton.disabled = false;
+  rejectButton.disabled = false;
+  state.textContent = '差分を読み込み中...';
+
+  try {
+    const loadDiff = async () => {
+      state.textContent = '差分を取得中...';
+      const diffPayload = await fetchJson(`/api/v1/tasks/${task.id}/diff`);
+      diffPreview.textContent = diffPayload.diff || '差分はありません。';
+      state.textContent = `${task.target_ref || '保存済みブランチ'} との差分を表示中`;
+    };
+
+    approveButton.onclick = async () => {
+      state.textContent = '承認処理中...';
+      approveButton.disabled = true;
+      rejectButton.disabled = true;
+      const approvalPayload = await fetchJson(`/api/v1/tasks/${task.id}/approve`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({}),
+      });
+      const refreshedPayload = approvalPayload.task ? await loadTaskDetail(approvalPayload.task.id) : await loadTaskDetail(task.id);
+      renderTaskDetail(refreshedPayload);
+    };
+
+    rejectButton.onclick = async () => {
+      state.textContent = '却下処理中...';
+      approveButton.disabled = true;
+      rejectButton.disabled = true;
+      const rejectPayload = await fetchJson(`/api/v1/tasks/${task.id}/reject`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ reason: 'manual rejection' }),
+      });
+      const refreshedPayload = rejectPayload.task ? await loadTaskDetail(rejectPayload.task.id) : await loadTaskDetail(task.id);
+      renderTaskDetail(refreshedPayload);
+    };
+
+    await loadDiff();
+  } catch (error) {
+    if (String(error).includes('working_branch_not_found')) {
+      const refreshedPayload = await loadTaskDetail(task.id);
+      if (refreshedPayload.task.status !== 'waiting_approval') {
+        renderTaskDetail(refreshedPayload);
+        return;
+      }
+      state.textContent = '作業ブランチが存在しません。状態が不整合のため、承認操作はできません。';
+      approveButton.disabled = true;
+      rejectButton.disabled = true;
+    } else {
+      state.textContent = `承認情報の取得に失敗しました: ${String(error)}`;
+    }
+    diffPreview.textContent = '';
+  }
+}
+
+async function loadRepositoryBranches() {
+  const repositoryPath = document.getElementById('task-repository-path');
+  const targetRef = document.getElementById('task-target-ref');
+  const message = document.getElementById('task-submit-message');
+  if (!repositoryPath || !targetRef || !message) {
+    return;
+  }
+
+  const repositoryValue = repositoryPath.value.trim();
+  if (!repositoryValue.startsWith('https://github.com/')) {
+    targetRef.innerHTML = '<option value="">候補ブランチを選択</option>';
+    targetRef.disabled = true;
+    return;
+  }
+
+  try {
+    const payload = await fetchJson(`/api/v1/repositories/branches?repository_url=${encodeURIComponent(repositoryValue)}`);
+    const branches = payload.branches || [];
+    targetRef.innerHTML = ['<option value="">候補ブランチを選択</option>']
+      .concat(branches.map((branch) => `<option value="${escapeHtml(branch)}">${escapeHtml(branch)}</option>`))
+      .join('');
+    targetRef.disabled = false;
+    if (payload.default_branch) {
+      targetRef.value = payload.default_branch;
+    }
+    if (!branches.length) {
+      message.textContent = '候補ブランチがありません。';
+    }
+  } catch (error) {
+    targetRef.innerHTML = '<option value="">候補ブランチを選択</option>';
+    targetRef.disabled = true;
+    message.textContent = `ブランチ一覧の取得に失敗しました: ${String(error)}`;
+  }
 }
 
 async function updateHealth(root, output) {
@@ -77,9 +209,10 @@ async function submitTask() {
   const title = document.getElementById('task-title');
   const instruction = document.getElementById('task-instruction');
   const repositoryPath = document.getElementById('task-repository-path');
+  const targetRef = document.getElementById('task-target-ref');
   const state = document.getElementById('submit-state');
   const message = document.getElementById('task-submit-message');
-  if (!title || !instruction || !repositoryPath || !state || !message) {
+  if (!title || !instruction || !repositoryPath || !targetRef || !state || !message) {
     return;
   }
   state.textContent = 'sending';
@@ -93,6 +226,7 @@ async function submitTask() {
         task: title.value,
         instruction: instruction.value,
         repository_path: repositoryPath.value,
+        target_ref: targetRef.value,
       }),
     });
     state.textContent = payload.task.status;
@@ -130,13 +264,20 @@ async function bootMarunageDashboard() {
   const root = document.getElementById('marunage-app');
   const output = document.getElementById('api-health-output');
   const form = document.getElementById('task-form');
-  if (!root || !output || !form) {
+  const repositoryPath = document.getElementById('task-repository-path');
+  if (!root || !output || !form || !repositoryPath) {
     return;
   }
 
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     await submitTask();
+  });
+  repositoryPath.addEventListener('change', () => {
+    void loadRepositoryBranches();
+  });
+  repositoryPath.addEventListener('blur', () => {
+    void loadRepositoryBranches();
   });
   window.addEventListener('hashchange', () => {
     void routeDashboard();

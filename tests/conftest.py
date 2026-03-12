@@ -72,6 +72,7 @@ class FakeMariaDBConnection:
                 "target_ref": None,
                 "working_branch": None,
                 "payload_json": None,
+                "approval_required": False,
                 "result_summary_md": None,
                 "started_at": None,
             },
@@ -88,6 +89,7 @@ class FakeMariaDBConnection:
                 "target_ref": None,
                 "working_branch": None,
                 "payload_json": None,
+                "approval_required": False,
                 "result_summary_md": None,
                 "started_at": None,
             },
@@ -104,6 +106,7 @@ class FakeMariaDBConnection:
                 "target_ref": None,
                 "working_branch": None,
                 "payload_json": None,
+                "approval_required": False,
                 "result_summary_md": None,
                 "started_at": None,
             },
@@ -183,6 +186,7 @@ class FakeMariaDBConnection:
                     "target_repo": selected.get("target_repo"),
                     "target_ref": selected.get("target_ref"),
                     "working_branch": selected.get("working_branch"),
+                    "approval_required": selected.get("approval_required", False),
                 }
             return FakeCursor([task] if task else [], 1 if task else 0)
         if normalized.startswith("SELECT id, root_task_id, task_type, status, assigned_service, priority, workspace_path, target_repo, target_ref, working_branch, result_summary_md, created_at FROM tasks ORDER BY created_at DESC, id DESC LIMIT 50"):

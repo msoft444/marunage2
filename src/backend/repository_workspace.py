@@ -99,6 +99,115 @@ class RepositoryWorkspaceManager:
             raise CommitPushError(f"too_many_changed_files: {len(unique_files)} > {max_changed_files}")
         return unique_files
 
+    def list_merge_targets(self, workspace_path: str, working_branch: str) -> list[str]:
+        repo_path = self._repo_path(workspace_path)
+        self._require_working_branch(working_branch)
+        try:
+            self._invoke_git(["git", "fetch", "origin", "--prune"], repo_path)
+            self._resolve_working_branch_ref(repo_path, working_branch)
+            output = self._invoke_git_capture(["git", "branch", "-r", "--format=%(refname:short)"], repo_path)
+        except Exception as error:
+            if isinstance(error, CommitPushError):
+                raise
+            raise CommitPushError(f"merge_target_list_failed: {self._stringify_git_error(error)}") from error
+
+        allowed_targets = self._allowed_merge_targets()
+        merge_targets: list[str] = []
+        for line in output.splitlines():
+            candidate = line.strip()
+            if not candidate or "->" in candidate or not candidate.startswith("origin/"):
+                continue
+            branch_name = candidate.removeprefix("origin/")
+            if branch_name in allowed_targets and branch_name not in merge_targets:
+                merge_targets.append(branch_name)
+        return merge_targets
+
+    def list_repository_branches(self, repository_url: str) -> list[str]:
+        try:
+            output = self._invoke_git_capture(
+                self._with_github_auth(["git", "ls-remote", "--heads", repository_url], repository_url),
+                Path.cwd(),
+            )
+        except Exception as error:
+            raise CommitPushError(f"branch_list_failed: {self._stringify_git_error(error)}") from error
+
+        allowed_targets = self._allowed_merge_targets()
+        branches: list[str] = []
+        for line in output.splitlines():
+            if "\trefs/heads/" not in line:
+                continue
+            branch_name = line.split("\trefs/heads/", 1)[1].strip()
+            if branch_name in allowed_targets and branch_name not in branches:
+                branches.append(branch_name)
+        return branches
+
+    def get_diff(self, workspace_path: str, working_branch: str, merge_target: str = "main") -> str:
+        repo_path = self._repo_path(workspace_path)
+        self._require_working_branch(working_branch)
+        merge_target = self._validate_merge_target(merge_target)
+        self._assert_remote_branch_exists(repo_path, merge_target)
+        diff_source = self._resolve_working_branch_ref(repo_path, working_branch)
+        try:
+            return self._invoke_git_capture(
+                ["git", "diff", "--no-ext-diff", f"origin/{merge_target}...{diff_source}"],
+                repo_path,
+            )
+        except Exception as error:
+            raise CommitPushError(f"diff_generation_failed: {self._stringify_git_error(error)}") from error
+
+    def merge_and_cleanup(self, workspace_path: str, working_branch: str, merge_target: str = "main") -> dict[str, Any]:
+        repo_path = self._repo_path(workspace_path)
+        self._require_working_branch(working_branch)
+        merge_target = self._validate_merge_target(merge_target)
+        self._assert_remote_branch_exists(repo_path, merge_target)
+        self._ensure_local_working_branch(repo_path, working_branch)
+
+        try:
+            self._invoke_git(["git", "fetch", "origin", merge_target], repo_path)
+            if self._local_branch_exists(repo_path, merge_target):
+                self._invoke_git(["git", "checkout", merge_target], repo_path)
+                self._invoke_git(["git", "merge", "--ff-only", f"origin/{merge_target}"], repo_path)
+            else:
+                self._invoke_git(["git", "checkout", "-b", merge_target, f"origin/{merge_target}"], repo_path)
+            self._invoke_git(
+                ["git", "merge", "--no-ff", working_branch, "-m", f"Merge {working_branch} into {merge_target}"],
+                repo_path,
+            )
+        except Exception as error:
+            message = self._stringify_git_error(error)
+            if "CONFLICT" in message or "Automatic merge failed" in message:
+                raise CommitPushError(f"merge_conflict: {message}") from error
+            raise CommitPushError(f"merge_failed: {message}") from error
+
+        try:
+            remote_url = self._invoke_git_capture(["git", "remote", "get-url", "origin"], repo_path).strip()
+            self._invoke_git(self._with_github_auth(["git", "push", "origin", merge_target], remote_url), repo_path)
+        except Exception as error:
+            raise CommitPushError(f"merge_push_rejected: {self._stringify_git_error(error)}") from error
+
+        deleted_local_branch = False
+        try:
+            if self._local_branch_exists(repo_path, working_branch):
+                self._invoke_git(["git", "branch", "-d", working_branch], repo_path)
+                deleted_local_branch = True
+        except Exception as error:
+            raise CommitPushError(f"branch_cleanup_local_failed: {self._stringify_git_error(error)}") from error
+
+        deleted_remote_branch = False
+        try:
+            remote_url = self._invoke_git_capture(["git", "remote", "get-url", "origin"], repo_path).strip()
+            self._invoke_git(self._with_github_auth(["git", "push", "origin", "--delete", working_branch], remote_url), repo_path)
+            deleted_remote_branch = True
+        except Exception as error:
+            raise CommitPushError(f"branch_cleanup_remote_failed: {self._stringify_git_error(error)}") from error
+
+        return {
+            "merge_target": merge_target,
+            "working_branch": working_branch,
+            "deleted_local_branch": deleted_local_branch,
+            "deleted_remote_branch": deleted_remote_branch,
+        }
+
     def prepare_repository(
         self,
         workspace_path: str,
@@ -242,6 +351,73 @@ class RepositoryWorkspaceManager:
                 continue
             changed_files.append(line[3:].strip())
         return changed_files
+
+    @staticmethod
+    def _allowed_merge_targets() -> set[str]:
+        configured = os.getenv("MERGE_TARGET_ALLOWLIST", "main,develop")
+        return {item.strip() for item in configured.split(",") if item.strip()}
+
+    @classmethod
+    def allowed_merge_targets(cls) -> set[str]:
+        return cls._allowed_merge_targets()
+
+    def _validate_merge_target(self, merge_target: str) -> str:
+        normalized = (merge_target or "main").strip()
+        if not normalized:
+            normalized = "main"
+        if not re.fullmatch(r"[a-zA-Z0-9._/-]+", normalized):
+            raise CommitPushError("merge_target_not_allowed")
+        if normalized not in self._allowed_merge_targets():
+            raise CommitPushError("merge_target_not_allowed")
+        return normalized
+
+    def validate_merge_target(self, merge_target: str) -> str:
+        return self._validate_merge_target(merge_target)
+
+    @staticmethod
+    def _repo_path(workspace_path: str) -> Path:
+        repo_path = Path(workspace_path) / "repo"
+        if not repo_path.is_dir():
+            raise CommitPushError("repository_not_found")
+        return repo_path
+
+    @staticmethod
+    def _require_working_branch(working_branch: str) -> None:
+        if not isinstance(working_branch, str) or not working_branch.strip():
+            raise CommitPushError("working_branch_missing")
+
+    def _assert_remote_branch_exists(self, repo_path: Path, merge_target: str) -> None:
+        try:
+            self._invoke_git(["git", "fetch", "origin", merge_target], repo_path)
+            self._invoke_git(["git", "rev-parse", "--verify", f"origin/{merge_target}"], repo_path)
+        except Exception as error:
+            raise CommitPushError(f"merge_target_not_found: {self._stringify_git_error(error)}") from error
+
+    def _resolve_working_branch_ref(self, repo_path: Path, working_branch: str) -> str:
+        if self._local_branch_exists(repo_path, working_branch):
+            return working_branch
+        try:
+            self._invoke_git(["git", "fetch", "origin", working_branch], repo_path)
+            self._invoke_git(["git", "rev-parse", "--verify", f"origin/{working_branch}"], repo_path)
+        except Exception as error:
+            raise CommitPushError("working_branch_not_found") from error
+        return f"origin/{working_branch}"
+
+    def _ensure_local_working_branch(self, repo_path: Path, working_branch: str) -> None:
+        working_branch_ref = self._resolve_working_branch_ref(repo_path, working_branch)
+        if working_branch_ref == working_branch:
+            return
+        try:
+            self._invoke_git(["git", "checkout", "-B", working_branch, working_branch_ref], repo_path)
+        except Exception as error:
+            raise CommitPushError(f"working_branch_checkout_failed: {self._stringify_git_error(error)}") from error
+
+    def _local_branch_exists(self, repo_path: Path, branch_name: str) -> bool:
+        try:
+            self._invoke_git(["git", "rev-parse", "--verify", branch_name], repo_path)
+        except Exception:
+            return False
+        return True
 
     @staticmethod
     def _build_commit_message(task_title: str | None, result_summary_md: str | None, default_message: str = "Apply generated artifact") -> str:

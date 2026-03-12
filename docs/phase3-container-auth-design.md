@@ -34,9 +34,12 @@
 
 ### 2.2 コンテナ構成
 
+- `docker-compose.prod.yml` と `docker-compose.test.yml` は異なる compose project 名を持ち、prod/test のコンテナ・ネットワーク・volume が衝突しない。
 - `docker-compose.prod.yml` から `.copilot` のホストマウント設定を削除する。
 - `docker-compose.prod.yml` から `github_token` secret と `GITHUB_TOKEN_FILE` 設定を削除する。
+- `docker-compose.prod.yml` の `mariadb` サービスも `env_file` から `DB_NAME` / `DB_USER` を読み込み、初回初期化時に空文字列で DB / user を作成しない。
 - `brain`、`guardian`、`dashboard`、`librarian` は `GITHUB_TOKEN` を必須環境変数として扱う。
+- `dashboard` は承認ワークフロー（diff / merge-targets / approve）でリポジトリへアクセスするため、`brain` と同様に `./workspace:/workspace` を volume マウントする。
 - `GITHUB_TOKEN` は Maru-nage のアプリケーションコンテナ群へ統一的に注入し、`GITHUB_TOKEN_FILE` や secret ファイルとの二重運用を残さない。
 
 ### 2.3 障害時の扱い
@@ -59,9 +62,13 @@
 ### 3.2 期待される変更
 
 - Compose は `env_file` と実行時環境変数の組み合わせで `GITHUB_TOKEN` を受け取る。
+- Compose project 名は prod/test で分離し、テスト実行が本番 MariaDB コンテナや named volume を再利用しない。
 - `entrypoint.sh` は `GITHUB_TOKEN_FILE` なしでも動作し、各アプリケーションサービスで `GITHUB_TOKEN` の存在を検証する。
+- DB 接続情報は `DB_PASSWORD_FILE` を優先的に解決し、`service_runner.py` から参照される `DB_PASSWORD` へ反映する。secret 値を更新した場合は DB ユーザ作成時のパスワードと不整合を残さない。
+- MariaDB の初期化に必要な `DB_NAME` / `DB_USER` は prod compose の `mariadb` サービスでも `env_file` から供給し、secret 変更時は既存 volume を再初期化する。
 - 初期化スクリプトと運用手順書は `secrets/github_token` の作成や記入を要求しない。
 - テストは、secret 依存の除去、`GITHUB_TOKEN` 注入、起動前失敗条件の検証をカバーする。
+- Dashboard HTTP ハンドラは内部例外で TCP 接続を切断せず、JSON の `500` エラーを返してブラウザ側の `Failed to fetch` を避ける。
 
 ## 4. 受け入れ条件
 
@@ -71,6 +78,7 @@
 4. `gh` 未導入・未ログイン・空トークンの各ケースで、コンテナ起動前に失敗する。
 5. 運用ドキュメントが新しい起動手順を説明している。
 6. `brain` の GitHub clone / push が `GITHUB_TOKEN` で認証され、token が git remote 設定へ残らない。
+7. `docker-compose.test.yml` のテスト実行が `docker-compose.prod.yml` の MariaDB コンテナや volume と衝突しない。
 
 ## 5. 関連ドキュメント
 

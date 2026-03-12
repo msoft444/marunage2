@@ -34,6 +34,8 @@ def _init_workspace_repo(tmp_path: Path) -> tuple[Path, Path, Path]:
     artifacts.mkdir(parents=True)
     patches.mkdir(parents=True)
     _git(["clone", str(origin), str(repo)], tmp_path)
+    _git(["config", "user.name", "Test User"], repo)
+    _git(["config", "user.email", "test@example.com"], repo)
     _git(["checkout", "-B", "mn2/1/phase0", "origin/main"], repo)
     return workspace, repo, origin
 
@@ -155,3 +157,115 @@ def test_repository_workspace_manager_uses_github_token_header_for_github_push(t
     assert push_command[:3] == ["git", "-c", f"http.https://github.com/.extraheader=AUTHORIZATION: basic {expected_header}"]
     assert push_command[3:] == ["push", "origin", "mn2/1/phase0"]
     assert result["commit_sha"] == "abc123"
+
+
+def test_repository_workspace_manager_lists_allowlisted_merge_targets(monkeypatch, tmp_path):
+    workspace = tmp_path / "1"
+    repo = workspace / "repo"
+    repo.mkdir(parents=True)
+
+    def fake_git_runner(args: list[str], cwd: Path):
+        if args == ["git", "fetch", "origin", "--prune"]:
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        if args == ["git", "rev-parse", "--verify", "mn2/1/phase0"]:
+            return subprocess.CompletedProcess(args, 0, stdout="mn2/1/phase0\n", stderr="")
+        if args == ["git", "branch", "-r", "--format=%(refname:short)"]:
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                stdout="origin/HEAD -> origin/main\norigin/main\norigin/develop\norigin/release/v1\n",
+                stderr="",
+            )
+        raise AssertionError(args)
+
+    monkeypatch.setenv("MERGE_TARGET_ALLOWLIST", "main,develop")
+    manager = RepositoryWorkspaceManager(git_command_runner=fake_git_runner)
+
+    result = manager.list_merge_targets(workspace_path=str(workspace), working_branch="mn2/1/phase0")
+
+    assert result == ["main", "develop"]
+
+
+def test_repository_workspace_manager_returns_diff_against_merge_target(tmp_path):
+    workspace, repo, _origin = _init_workspace_repo(tmp_path)
+    _git(["checkout", "mn2/1/phase0"], repo)
+    (repo / "README.md").write_text("hello\nupdated\n", encoding="utf-8")
+    _git(["add", "README.md"], repo)
+    _git(["commit", "-m", "update readme"], repo)
+
+    manager = RepositoryWorkspaceManager()
+
+    diff_text = manager.get_diff(
+        workspace_path=str(workspace),
+        working_branch="mn2/1/phase0",
+        merge_target="main",
+    )
+
+    assert "README.md" in diff_text
+    assert "+updated" in diff_text
+
+
+def test_repository_workspace_manager_merges_into_target_and_cleans_up_branches(tmp_path):
+    workspace, repo, origin = _init_workspace_repo(tmp_path)
+    _git(["checkout", "mn2/1/phase0"], repo)
+    (repo / "README.md").write_text("hello\nupdated\n", encoding="utf-8")
+    _git(["add", "README.md"], repo)
+    _git(["commit", "-m", "update readme"], repo)
+    _git(["push", "origin", "mn2/1/phase0"], repo)
+
+    manager = RepositoryWorkspaceManager()
+
+    result = manager.merge_and_cleanup(
+        workspace_path=str(workspace),
+        working_branch="mn2/1/phase0",
+        merge_target="main",
+    )
+
+    _git(["checkout", "main"], repo)
+    assert "updated" in (repo / "README.md").read_text(encoding="utf-8")
+    assert _git(["branch", "--list", "mn2/1/phase0"], repo).stdout.strip() == ""
+    assert _git(["--git-dir", str(origin), "branch", "--list", "mn2/1/phase0"], tmp_path).stdout.strip() == ""
+    assert result["merge_target"] == "main"
+    assert result["deleted_local_branch"] is True
+    assert result["deleted_remote_branch"] is True
+
+
+def test_repository_workspace_manager_rejects_non_allowlisted_merge_target(tmp_path):
+    workspace, _repo, _origin = _init_workspace_repo(tmp_path)
+    manager = RepositoryWorkspaceManager()
+
+    with pytest.raises(CommitPushError, match="merge_target_not_allowed"):
+        manager.get_diff(
+            workspace_path=str(workspace),
+            working_branch="mn2/1/phase0",
+            merge_target="release/v1",
+        )
+
+
+def test_repository_workspace_manager_reports_missing_working_branch_for_diff(tmp_path):
+    workspace, repo, _origin = _init_workspace_repo(tmp_path)
+    _git(["checkout", "main"], repo)
+    _git(["branch", "-D", "mn2/1/phase0"], repo)
+
+    manager = RepositoryWorkspaceManager()
+
+    with pytest.raises(CommitPushError, match="working_branch_not_found"):
+        manager.get_diff(
+            workspace_path=str(workspace),
+            working_branch="mn2/1/phase0",
+            merge_target="main",
+        )
+
+
+def test_repository_workspace_manager_reports_missing_working_branch_for_merge_targets(tmp_path):
+    workspace, repo, _origin = _init_workspace_repo(tmp_path)
+    _git(["checkout", "main"], repo)
+    _git(["branch", "-D", "mn2/1/phase0"], repo)
+
+    manager = RepositoryWorkspaceManager()
+
+    with pytest.raises(CommitPushError, match="working_branch_not_found"):
+        manager.list_merge_targets(
+            workspace_path=str(workspace),
+            working_branch="mn2/1/phase0",
+        )

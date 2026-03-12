@@ -59,6 +59,9 @@ COPY --chown=marunage:marunage src ./src
 COPY --chown=marunage:marunage tests ./tests
 COPY --chown=marunage:marunage scripts ./scripts
 COPY --chown=marunage:marunage init.sql ./init.sql
+COPY --chown=marunage:marunage Dockerfile ./Dockerfile
+COPY --chown=marunage:marunage docker-compose.prod.yml ./docker-compose.prod.yml
+COPY --chown=marunage:marunage docker-compose.test.yml ./docker-compose.test.yml
 RUN chmod 755 /app/scripts/entrypoint.sh
 
 USER marunage

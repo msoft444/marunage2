@@ -7,6 +7,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 COMPOSE_FILE = ROOT / "docker-compose.prod.yml"
+TEST_COMPOSE_FILE = ROOT / "docker-compose.test.yml"
 ENTRYPOINT = ROOT / "scripts" / "entrypoint.sh"
 INIT_RUNTIME = ROOT / "scripts" / "init_runtime.sh"
 README_RUNTIME = ROOT / "scripts" / "README-runtime.txt"
@@ -21,6 +22,48 @@ def test_phase3_compose_uses_github_token_for_all_app_services_without_legacy_au
     assert "GITHUB_TOKEN_FILE" not in content
     assert "github_token:" not in content
     assert content.count("GITHUB_TOKEN:") >= 4
+
+
+def test_phase3_prod_mariadb_uses_runtime_env_file_for_db_identity():
+    content = COMPOSE_FILE.read_text(encoding="utf-8")
+
+    assert "name: marunage2-prod" in content
+    assert "mariadb:\n    image: mariadb:11.8\n    restart: unless-stopped\n    env_file:" in content
+    assert "- ${RUNTIME_ENV_FILE:-.env.runtime}" in content
+    assert "MARIADB_DATABASE: ${DB_NAME}" in content
+    assert "MARIADB_USER: ${DB_USER}" in content
+
+
+def test_phase3_test_compose_uses_separate_project_name_from_prod():
+    prod_content = COMPOSE_FILE.read_text(encoding="utf-8")
+    test_content = TEST_COMPOSE_FILE.read_text(encoding="utf-8")
+
+    assert "name: marunage2-prod" in prod_content
+    assert "name: marunage2-test" in test_content
+
+
+def test_phase3_dashboard_has_workspace_volume_mount():
+    """Dashboard needs /workspace access for diff, merge-targets, and approve APIs."""
+    content = COMPOSE_FILE.read_text(encoding="utf-8")
+    # Find the dashboard service block and check for workspace mount
+    in_dashboard = False
+    in_next_service = False
+    dashboard_lines = []
+    for line in content.splitlines():
+        if line.strip() == "dashboard:":
+            in_dashboard = True
+            continue
+        if in_dashboard:
+            # A new top-level service starts with 2-space indent + name + colon
+            if line and not line.startswith("    ") and not line.startswith("  ") and line.strip():
+                break
+            if line and not line.startswith("    ") and line.strip().endswith(":") and not line.startswith("      "):
+                break
+            dashboard_lines.append(line)
+    dashboard_block = "\n".join(dashboard_lines)
+    assert "./workspace:/workspace" in dashboard_block, (
+        "dashboard service must mount ./workspace:/workspace for approval workflow"
+    )
 
 
 def test_runtime_dockerfile_installs_copilot_cli_without_gh_cli():

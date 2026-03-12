@@ -78,6 +78,12 @@
                 <input id="task-repository-path" name="repository_path" type="text" placeholder="例: /workspace/repo-a または https://github.com/org/repo" />
               </label>
               <label>
+                <span>元ブランチ</span>
+                <select id="task-target-ref" name="target_ref" disabled>
+                  <option value="">候補ブランチを選択</option>
+                </select>
+              </label>
+              <label>
                 <span>依頼内容</span>
                 <textarea id="task-instruction" name="instruction" rows="6" placeholder="依頼内容を具体的に記述"></textarea>
               </label>
@@ -111,6 +117,17 @@
               <section class="detail-block">
                 <h4>Result</h4>
                 <article id="task-detail-result" class="result-card"></article>
+              </section>
+              <section id="task-approval-panel" class="detail-block" hidden>
+                <h4>Approval</h4>
+                <div class="approval-actions">
+                  <div class="approval-buttons">
+                    <button id="task-approve" type="button">承認してマージ</button>
+                    <button id="task-reject" type="button">却下</button>
+                  </div>
+                  <p id="task-approval-state" class="helper-text">承認待ちタスクの差分を確認できます。</p>
+                </div>
+                <pre id="task-diff-preview" class="result-card"></pre>
               </section>
             </div>
           </section>

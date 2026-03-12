@@ -185,9 +185,16 @@ Dashboard は管制塔であり、通常の状態参照と操作要求は DB 経
 1. 対象リポジトリ、基準ブランチ、依頼本文
 2. 自己改修フラグ
 3. 承認必須フラグ
-4. 参照ナレッジの選択
+4. マージ対象ブランチ。デフォルトは `main`
+5. 参照ナレッジの選択
 
 送信時は `tasks` に `task_type = 'requirement_session'` またはフェーズ開始タスクを作成し、初回メッセージを `messages` に書く。
+
+承認必須フラグの意味は以下とする。
+
+1. GitHub clone task では、最終段の `working_branch -> merge_target_branch` マージ承認を要求するフラグとして使う。
+2. local `workspace_path` task では承認フローを持たないため、`approval_required = false` を標準とする。
+3. 承認対象は途中の commit/push ではなく、最終マージのみとする。
 
 #### 開発履歴一覧画面
 
@@ -197,6 +204,7 @@ Dashboard は管制塔であり、通常の状態参照と操作要求は DB 経
 2. 現在フェーズ、最終結果、最終更新時刻
 3. 使用したモデル一覧
 4. 承認待ち、失敗、差し戻しのラベル
+5. GitHub clone task の場合は `working_branch` とマージ対象ブランチを表示する
 
 一覧は `tasks.root_task_id` 単位で集約し、`messages` の最新要約と `logs` の重要イベントをバッジ化して表示する。
 
@@ -209,6 +217,7 @@ Dashboard は管制塔であり、通常の状態参照と操作要求は DB 経
 3. ナレッジ検索結果
 4. テスト Red、Green、監査結果
 5. 再起動や秘密情報検知などの運用イベント
+6. GitHub clone task の場合は承認前 diff、承認対象ブランチ、merge 成否、開発ブランチ削除成否
 
 メッセージ本体は `messages`、構造化運用イベントは `logs` を統合表示する。UI 上は秘密情報の検知件数だけを見せ、秘密文字列そのものは出さない。
 

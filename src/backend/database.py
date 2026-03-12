@@ -37,6 +37,7 @@ class QueueTaskRow:
     target_repo: str | None = None
     target_ref: str | None = None
     working_branch: str | None = None
+    approval_required: bool = False
 
 
 @dataclass(frozen=True)
@@ -129,7 +130,7 @@ class MariaDBAccessor:
 
     def select_next_queued_task(self, service_name: str) -> QueueTaskRow | None:
         query = (
-            "SELECT id, root_task_id, status, assigned_service, priority, payload_json, workspace_path, target_repo, target_ref, working_branch "
+            "SELECT id, root_task_id, status, assigned_service, priority, payload_json, workspace_path, target_repo, target_ref, working_branch, approval_required "
             "FROM tasks WHERE assigned_service = %s AND status = 'queued' "
             "ORDER BY priority DESC, created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED"
         )

@@ -16,6 +16,9 @@ def test_dashboard_root_serves_marunage_ui_document():
     assert 'id="task-form"' in response["body"]
     assert 'id="task-detail-view"' in response["body"]
     assert 'id="task-repository-path"' in response["body"]
+    assert 'id="task-target-ref"' in response["body"]
+    assert 'id="task-approval-panel"' in response["body"]
+    assert 'class="approval-actions"' in response["body"]
     assert 'https://github.com/' in response["body"]
 
 
@@ -26,8 +29,12 @@ def test_dashboard_task_form_exposes_single_repository_input():
 
     assert response["body"].count('id="task-repository-path"') == 1
     assert response["body"].count('name="repository_path"') == 1
+    assert response["body"].count('id="task-target-ref"') == 1
+    assert response["body"].count('name="target_ref"') == 1
     assert response["body"].count('<span>対象リポジトリ</span>') == 1
+    assert response["body"].count('<span>元ブランチ</span>') == 1
     assert 'placeholder="例: /workspace/repo-a または https://github.com/org/repo"' in response["body"]
+    assert '候補ブランチを選択' in response["body"]
 
 
 def test_dashboard_index_html_prefers_static_ui_over_api_json():
@@ -51,6 +58,29 @@ def test_dashboard_static_asset_is_served_with_javascript_mime_type():
     assert "fetchJson('/api/v1/tasks'" in response["body"]
     assert "window.location.hash" in response["body"]
     assert "repository_path" in response["body"]
+    assert "/api/v1/repositories/branches" in response["body"]
+    assert "/approve" in response["body"]
+    assert "/reject" in response["body"]
+    assert "approvalPayload.task" in response["body"]
+    assert "rejectPayload.task" in response["body"]
+    assert "hideApprovalPanel" in response["body"]
+    assert "working_branch_not_found" in response["body"]
+    assert "target_ref" in response["body"]
+    assert "マージ済みまたは却下済みのため、承認操作はできません。" in response["body"]
+    assert "task-merge-target" not in response["body"]
+
+
+def test_dashboard_static_asset_is_served_with_css_mime_type_and_approval_styles():
+    dashboard = SecureDashboard()
+
+    response = dashboard.serve_path("/static/css/app.css")
+
+    assert response["status"] == 200
+    assert response["content_type"] == "text/css; charset=utf-8"
+    assert "#task-diff-preview" in response["body"]
+    assert ".approval-actions" in response["body"]
+    assert "#task-approve" in response["body"]
+    assert "#task-reject" in response["body"]
 
 
 def test_dashboard_api_prefix_returns_json_payload():

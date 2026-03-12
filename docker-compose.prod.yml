@@ -1,7 +1,11 @@
+name: marunage2-prod
+
 services:
   mariadb:
     image: mariadb:11.8
     restart: unless-stopped
+    env_file:
+      - ${RUNTIME_ENV_FILE:-.env.runtime}
     environment:
       MARIADB_DATABASE: ${DB_NAME}
       MARIADB_USER: ${DB_USER}
@@ -75,6 +79,8 @@ services:
     depends_on:
       mariadb:
         condition: service_healthy
+    volumes:
+      - ./workspace:/workspace
     secrets:
       - db_password
     ports:

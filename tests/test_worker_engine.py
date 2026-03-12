@@ -191,7 +191,7 @@ def test_worker_blocks_task_when_instruction_is_missing(db_connection_mock):
     assert any(log["event_type"] == "invalid_instruction" for log in db_connection_mock.logs)
 
 
-def test_worker_generates_llm_response_commits_changes_and_marks_succeeded(db_connection_mock, tmp_path):
+def test_worker_generates_llm_response_commits_changes_and_marks_waiting_approval_for_github_clone_task(db_connection_mock, tmp_path):
     prompts: list[str] = []
 
     class FakeLLMClient:
@@ -203,6 +203,7 @@ def test_worker_generates_llm_response_commits_changes_and_marks_succeeded(db_co
     db_connection_mock.tasks[1]["target_repo"] = "example/project"
     db_connection_mock.tasks[1]["target_ref"] = "main"
     db_connection_mock.tasks[1]["working_branch"] = "mn2/1/phase0"
+    db_connection_mock.tasks[1]["approval_required"] = True
     db_connection_mock.tasks[1]["payload_json"] = {
         "task": "README を更新",
         "instruction": "README に現在時刻を記載する",
@@ -243,7 +244,7 @@ def test_worker_generates_llm_response_commits_changes_and_marks_succeeded(db_co
 
     artifact_path = tmp_path / "1" / "artifacts" / "llm_response.md"
     assert processed is True
-    assert db_connection_mock.tasks[1]["status"] == "succeeded"
+    assert db_connection_mock.tasks[1]["status"] == "waiting_approval"
     assert db_connection_mock.tasks[1]["result_summary_md"] == "READMEを更新しました"
     assert artifact_path.read_text(encoding="utf-8") == "READMEを更新しました\n\n- 現在時刻を追記しました。"
     assert "You are generating a proposal artifact only." not in prompts[0]
@@ -258,6 +259,41 @@ def test_worker_generates_llm_response_commits_changes_and_marks_succeeded(db_co
     assert any(log["event_type"] == "llm_generation_succeeded" for log in db_connection_mock.logs)
     assert any(log["event_type"] == "git_commit_succeeded" for log in db_connection_mock.logs)
     assert any(log["event_type"] == "git_push_succeeded" for log in db_connection_mock.logs)
+
+
+def test_worker_generates_llm_response_and_marks_local_task_succeeded_without_approval(db_connection_mock, tmp_path):
+    class FakeLLMClient:
+        def generate(self, prompt: str, metadata: dict | None = None) -> str:
+            return "READMEを更新しました\n\n- ローカル repo を更新しました。"
+
+    db_connection_mock.tasks[1]["workspace_path"] = str(tmp_path / "local-repo")
+    db_connection_mock.tasks[1]["target_repo"] = None
+    db_connection_mock.tasks[1]["target_ref"] = None
+    db_connection_mock.tasks[1]["working_branch"] = None
+    db_connection_mock.tasks[1]["approval_required"] = False
+    db_connection_mock.tasks[1]["payload_json"] = {
+        "task": "README を更新",
+        "instruction": "README に現在時刻を記載する",
+    }
+
+    engine = WorkerEngine(
+        db_connection_mock,
+        service_name="brain",
+        worker_name="worker-brain-1",
+        llm_client=FakeLLMClient(),
+        workspace_root=tmp_path,
+    )
+
+    processed = engine.run_once()
+
+    artifact_path = tmp_path / "local-repo" / "artifacts" / "llm_response.md"
+    assert processed is True
+    assert db_connection_mock.tasks[1]["status"] == "succeeded"
+    assert db_connection_mock.tasks[1]["result_summary_md"] == "READMEを更新しました"
+    assert artifact_path.exists()
+    assert any(log["event_type"] == "llm_generation_succeeded" for log in db_connection_mock.logs)
+    assert not any(log["event_type"] == "git_commit_succeeded" for log in db_connection_mock.logs)
+    assert not any(log["event_type"] == "git_push_succeeded" for log in db_connection_mock.logs)
 
 
 def test_worker_blocks_task_when_llm_client_is_not_configured(db_connection_mock, tmp_path):
@@ -404,12 +440,13 @@ def test_backend_blocks_task_when_commit_push_fails(db_connection_mock, tmp_path
     assert any(log["event_type"] == "git_push_failed" and "denied" in log["message"] for log in db_connection_mock.logs)
 
 
-def test_backend_blocks_task_when_direct_edit_produces_no_changes(db_connection_mock, tmp_path):
+def test_backend_marks_waiting_approval_when_direct_edit_produces_no_changes_for_approval_task(db_connection_mock, tmp_path):
     db_connection_mock.tasks[1]["status"] = "queued"
     db_connection_mock.tasks[1]["workspace_path"] = str(tmp_path / "1")
     db_connection_mock.tasks[1]["target_repo"] = "example/project"
     db_connection_mock.tasks[1]["target_ref"] = "main"
     db_connection_mock.tasks[1]["working_branch"] = "mn2/1/phase0"
+    db_connection_mock.tasks[1]["approval_required"] = True
     db_connection_mock.tasks[1]["result_summary_md"] = "README を更新しました"
     db_connection_mock.tasks[1]["payload_json"] = {
         "task": "README を更新",
@@ -442,8 +479,55 @@ def test_backend_blocks_task_when_direct_edit_produces_no_changes(db_connection_
     processed = backend.process_next_queued_task("brain", "worker-brain-1")
 
     assert processed is True
-    assert db_connection_mock.tasks[1]["status"] == "blocked"
+    assert db_connection_mock.tasks[1]["status"] == "waiting_approval"
     assert any(log["event_type"] == "phase_edit_no_changes" for log in db_connection_mock.logs)
+    assert any(log["event_type"] == "llm_generation_succeeded" for log in db_connection_mock.logs)
+    assert not any(log["event_type"] == "git_commit_succeeded" for log in db_connection_mock.logs)
+
+
+def test_backend_marks_succeeded_when_direct_edit_produces_no_changes_for_non_approval_task(db_connection_mock, tmp_path):
+    db_connection_mock.tasks[1]["status"] = "queued"
+    db_connection_mock.tasks[1]["workspace_path"] = str(tmp_path / "1")
+    db_connection_mock.tasks[1]["target_repo"] = "example/project"
+    db_connection_mock.tasks[1]["target_ref"] = "main"
+    db_connection_mock.tasks[1]["working_branch"] = "mn2/1/phase0"
+    db_connection_mock.tasks[1]["approval_required"] = False
+    db_connection_mock.tasks[1]["result_summary_md"] = "README を更新しました"
+    db_connection_mock.tasks[1]["payload_json"] = {
+        "task": "README を更新",
+        "instruction": "README に現在時刻を記載する",
+    }
+
+    class FakeLLMClient:
+        def generate(self, prompt: str, metadata: dict | None = None) -> str:
+            return "README を更新しました"
+
+    backend = MariaDBTaskBackend(db_connection_mock, llm_client=FakeLLMClient(), workspace_root=tmp_path)
+
+    class NoChangesRepositoryWorkspace:
+        def prepare_repository(self, **kwargs):
+            repo_path = tmp_path / "1" / "repo"
+            repo_path.mkdir(parents=True, exist_ok=True)
+            return {
+                "workspace_path": str(tmp_path / "1"),
+                "repo_path": str(repo_path),
+                "artifacts_path": str(tmp_path / "1" / "artifacts"),
+                "docs_snapshot_path": str(tmp_path / "1" / "system_docs_snapshot"),
+                "patches_path": str(tmp_path / "1" / "patches"),
+            }
+
+        def commit_and_push(self, **kwargs):
+            raise CommitPushError("phase_edit_no_changes")
+
+    backend.repository_workspace = NoChangesRepositoryWorkspace()
+
+    processed = backend.process_next_queued_task("brain", "worker-brain-1")
+
+    assert processed is True
+    assert db_connection_mock.tasks[1]["status"] == "succeeded"
+    assert any(log["event_type"] == "phase_edit_no_changes" for log in db_connection_mock.logs)
+    assert any(log["event_type"] == "llm_generation_succeeded" for log in db_connection_mock.logs)
+    assert not any(log["event_type"] == "git_commit_succeeded" for log in db_connection_mock.logs)
 
 
 def test_backend_blocks_deprecated_artifact_apply_path(db_connection_mock, tmp_path):

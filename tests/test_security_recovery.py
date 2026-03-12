@@ -1,6 +1,8 @@
+import io
 import json
+import os
 
-from scripts.service_runner import DashboardHandler
+from scripts.service_runner import DashboardHandler, load_file_backed_secrets
 from security import SecretScanner, SecureDashboard
 
 
@@ -91,3 +93,48 @@ def test_dashboard_handler_sets_security_headers():
     assert ("Content-Security-Policy", "default-src 'self'") in sent_headers
     assert ("X-Frame-Options", "DENY") in sent_headers
     assert body_chunks == [b"{}"]
+
+
+def test_load_file_backed_secrets_sets_db_password_from_file(monkeypatch, tmp_path):
+    secret_file = tmp_path / "db_password"
+    secret_file.write_text("secret-from-file\n", encoding="utf-8")
+    monkeypatch.delenv("DB_PASSWORD", raising=False)
+    monkeypatch.setenv("DB_PASSWORD_FILE", str(secret_file))
+
+    load_file_backed_secrets()
+
+    assert os.environ["DB_PASSWORD"] == "secret-from-file"
+
+
+def test_dashboard_handler_returns_json_500_when_post_processing_raises():
+    captured = []
+
+    class ExplodingDashboard:
+        def serve_request(self, method, path, body=None, headers=None):
+            raise RuntimeError("database unavailable")
+
+    handler = type("HandlerDouble", (), {})()
+    handler.headers = {"Content-Length": "2", "Origin": "http://localhost"}
+    handler.path = "/api/v1/tasks"
+    handler.rfile = io.BytesIO(b"{}")
+    handler.dashboard = ExplodingDashboard()
+    handler.send_error = lambda status, message=None: (_ for _ in ()).throw(AssertionError("must not use send_error"))
+    handler._send_dashboard_response = lambda response: captured.append(response)
+    handler._internal_error_response = lambda: DashboardHandler._internal_error_response(handler)
+    handler._dispatch_dashboard_request = lambda method, path, body=None, headers=None: DashboardHandler._dispatch_dashboard_request(
+        handler,
+        method,
+        path,
+        body=body,
+        headers=headers,
+    )
+
+    DashboardHandler.do_POST(handler)
+
+    assert captured == [
+        {
+            "status": 500,
+            "content_type": "application/json",
+            "body": '{"error": "internal_server_error"}',
+        }
+    ]

@@ -370,6 +370,7 @@ class MariaDBTaskBackend:
                 )
                 return True
 
+            target_status = "waiting_approval" if task.approval_required else "succeeded"
             try:
                 commit_result = self.repository_workspace.commit_and_push(
                     workspace_path=workspace_path,
@@ -378,6 +379,27 @@ class MariaDBTaskBackend:
                     result_summary_md=summary,
                 )
             except CommitPushError as error:
+                if str(error) == "phase_edit_no_changes":
+                    completed = self.db.update_task_result(task.id, "running", target_status, summary)
+                    if not completed:
+                        raise TaskConsistencyError(f"task {task.id} could not be updated after no-change direct-edit")
+                    self.db.insert_log(
+                        task.id,
+                        task.root_task_id,
+                        service_name,
+                        "llm_generation_succeeded",
+                        f"LLM response saved to {artifact_path}",
+                        worker_name,
+                    )
+                    self.db.insert_log(
+                        task.id,
+                        task.root_task_id,
+                        service_name,
+                        "phase_edit_no_changes",
+                        "Direct-edit produced no repository changes; skipped commit/push",
+                        worker_name,
+                    )
+                    return True
                 blocked = self.db.update_task_status(task.id, "running", "blocked")
                 if not blocked:
                     raise TaskConsistencyError(f"task {task.id} could not be blocked after direct-edit failure")
@@ -392,7 +414,7 @@ class MariaDBTaskBackend:
                 )
                 return True
 
-            completed = self.db.update_task_result(task.id, "running", "succeeded", summary)
+            completed = self.db.update_task_result(task.id, "running", target_status, summary)
             if not completed:
                 raise TaskConsistencyError(f"task {task.id} could not be updated after direct-edit success")
             self.db.insert_log(
@@ -421,7 +443,7 @@ class MariaDBTaskBackend:
             )
             return True
 
-        completed = self.db.update_task_result(task.id, "running", "waiting_approval", summary)
+        completed = self.db.update_task_result(task.id, "running", "succeeded", summary)
         if not completed:
             raise TaskConsistencyError(f"task {task.id} could not be updated after llm success")
         self.db.insert_log(

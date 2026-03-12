@@ -6,12 +6,13 @@
 - **Current Objective:** 今回の chat で完了させる 1 つの実装目標を簡潔に書く
 - **Relevant Docs:** `docs/<basic-design-doc>.md`, `docs/<destructive-test-design-doc>.md`
 - **Last Audit:** N/A
+- **Activity Log File:** `.tdd_activitylog.md`
 
 Status rule: `IN_PROGRESS` = docs/RED/GREEN/REFACTOR 実行中, `PENDING_AUDIT` = 実装と検証完了・監査待ち, `APPROVED` = 監査承認済み, `REJECTED` = 監査差し戻し対応中
 
-## 2. 📝 Activity Log
-- 2026-03-07 [System]: プロトコルテンプレートを初期化。
-- 2026-03-08 [System]: `docs/` を永続的な要件・設計の正本、`.tdd_protocol.md` を実行状態トラッカーとして扱う運用へ更新。
+## 2. 📝 Activity Log Reference
+- Detailed chronological history is tracked in `.tdd_activitylog.md`.
+- Append new execution entries to `.tdd_activitylog.md` for every task.
 
 ## 3. 🎯 Next Actions
 - [ ] **Docs**: `docs/` 配下で基本設計と非機能要件を更新し、`Relevant Docs` を最新化する。

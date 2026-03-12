@@ -1,5 +1,4 @@
 from .command_runner import SecureCommandRunner
-from .dashboard import SecureDashboard
 from .file_ops import SafeFileOps
 from .sandbox import WorkspaceSandbox
 from .secret_scanner import SecretScanner
@@ -11,3 +10,11 @@ __all__ = [
     "SecureDashboard",
     "SafeFileOps",
 ]
+
+
+def __getattr__(name: str):
+    if name == "SecureDashboard":
+        from .dashboard import SecureDashboard
+
+        return SecureDashboard
+    raise AttributeError(name)
