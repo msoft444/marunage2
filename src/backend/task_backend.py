@@ -16,8 +16,19 @@ from .llm_client import (
     LLMServiceError,
     LLMTimeoutError,
 )
+from .phase_orchestrator import PHASE_TASK_TYPES, PhaseOrchestrator
 from .repository_workspace import CommitPushError, RepositoryPreparationError, RepositoryWorkspaceManager
 from .state_machine import TaskStateMachine
+
+
+PHASE_PROMPT_CONTEXT = {
+    0: "Phase 0 / phase0_brainstorm: 要求整理と壁打ちに集中し、前提・論点・作業計画を docs に反映せよ。",
+    1: "Phase 1 / phase1_design: 基本設計に集中し、phase 0 の結果を踏まえて設計書と非機能要件を更新せよ。",
+    2: "Phase 2 / phase2_test_design: 破壊テスト設計に集中し、異常系・破壊シナリオを docs に追加せよ。",
+    3: "Phase 3 / phase3_test_impl: テスト実装に集中し、RED を先に作れ。",
+    4: "Phase 4 / phase4_impl: 本体実装に集中し、必要最小限の code/docs 同期だけを行え。",
+    5: "Phase 5 / phase5_audit: 監査に集中し、コード変更は行わず APPROVED または REJECTED と指摘を返せ。",
+}
 
 
 @dataclass
@@ -30,6 +41,7 @@ class MariaDBTaskBackend:
     def __post_init__(self) -> None:
         self.db = MariaDBAccessor(self.connection, workspace_root=self.workspace_root)
         self.repository_workspace = RepositoryWorkspaceManager(self.git_command_runner)
+        self.phase_orchestrator = PhaseOrchestrator(self.db)
 
     def resolve_orphan_promote(self, parent_status: str, promote_status: str) -> str:
         if promote_status == "succeeded":
@@ -121,6 +133,12 @@ class MariaDBTaskBackend:
                         f"Invalid workspace path: {error}",
                         worker_name,
                     )
+                    self.phase_orchestrator.handle_phase_blocked(
+                        task,
+                        service_name=service_name,
+                        worker_name=worker_name,
+                        reason="invalid_workspace_path",
+                    )
                     return True
 
             if task.target_repo and normalized_workspace_path and task.working_branch:
@@ -142,6 +160,12 @@ class MariaDBTaskBackend:
                         "repository_prepare_failed",
                         f"Repository preparation failed: {error}",
                         worker_name,
+                    )
+                    self.phase_orchestrator.handle_phase_blocked(
+                        task,
+                        service_name=service_name,
+                        worker_name=worker_name,
+                        reason="repository_prepare_failed",
                     )
                     return True
 
@@ -174,6 +198,12 @@ class MariaDBTaskBackend:
                     "invalid_instruction",
                     "Invalid instruction: payload_json.instruction is required",
                     worker_name,
+                )
+                self.phase_orchestrator.handle_phase_blocked(
+                    task,
+                    service_name=service_name,
+                    worker_name=worker_name,
+                    reason="invalid_instruction",
                 )
                 return True
             if instruction:
@@ -306,6 +336,7 @@ class MariaDBTaskBackend:
     ) -> bool:
         try:
             prompt = self._build_prompt(task, instruction)
+            llm_client = self._get_llm_client()
             self.db.insert_log(
                 task.id,
                 task.root_task_id,
@@ -314,7 +345,7 @@ class MariaDBTaskBackend:
                 "LLM generation started",
                 worker_name,
             )
-            response = self._get_llm_client().generate(
+            response = llm_client.generate(
                 prompt,
                 metadata={
                     "task_id": task.id,
@@ -328,6 +359,7 @@ class MariaDBTaskBackend:
             self._validate_response_size(sanitized_response)
             summary = self._build_result_summary(sanitized_response)
             artifact_path = self._write_llm_artifact(workspace_path, sanitized_response)
+            self._persist_phase_metadata(task, llm_client, summary)
         except (
             LLMAuthenticationError,
             LLMConfigurationError,
@@ -355,6 +387,9 @@ class MariaDBTaskBackend:
         if isinstance(task.payload_json, dict) and isinstance(task.payload_json.get("task"), str):
             task_title = task.payload_json["task"].strip()
 
+        is_orchestrated_task = self.phase_orchestrator.is_orchestrated_task(task)
+        is_audit_phase = is_orchestrated_task and task.phase == 5 and task.task_type == PHASE_TASK_TYPES[5]
+
         if task.target_repo:
             if not workspace_path or not task.working_branch:
                 blocked = self.db.update_task_status(task.id, "running", "blocked")
@@ -368,9 +403,37 @@ class MariaDBTaskBackend:
                     "Direct-edit requires workspace_path and working_branch",
                     worker_name,
                 )
+                self.phase_orchestrator.handle_phase_blocked(
+                    task,
+                    service_name=service_name,
+                    worker_name=worker_name,
+                    reason="invalid_repository_context",
+                )
                 return True
 
-            target_status = "waiting_approval" if task.approval_required else "succeeded"
+            if is_audit_phase:
+                completed = self.db.update_task_result(task.id, "running", "succeeded", summary)
+                if not completed:
+                    raise TaskConsistencyError(f"task {task.id} could not be updated after audit success")
+                self.db.insert_log(
+                    task.id,
+                    task.root_task_id,
+                    service_name,
+                    "llm_generation_succeeded",
+                    f"LLM response saved to {artifact_path}",
+                    worker_name,
+                )
+                self.phase_orchestrator.handle_phase_completion(
+                    task,
+                    service_name=service_name,
+                    worker_name=worker_name,
+                    result_summary=sanitized_response,
+                    review_state=self._parse_review_state(sanitized_response),
+                    audit_feedback=sanitized_response,
+                )
+                return True
+
+            target_status = "succeeded" if is_orchestrated_task else ("waiting_approval" if task.approval_required else "succeeded")
             try:
                 commit_result = self.repository_workspace.commit_and_push(
                     workspace_path=workspace_path,
@@ -399,6 +462,12 @@ class MariaDBTaskBackend:
                         "Direct-edit produced no repository changes; skipped commit/push",
                         worker_name,
                     )
+                    self.phase_orchestrator.handle_phase_completion(
+                        task,
+                        service_name=service_name,
+                        worker_name=worker_name,
+                        result_summary=summary,
+                    )
                     return True
                 blocked = self.db.update_task_status(task.id, "running", "blocked")
                 if not blocked:
@@ -411,6 +480,12 @@ class MariaDBTaskBackend:
                     event_type,
                     f"Direct-edit failed: {error}",
                     worker_name,
+                )
+                self.phase_orchestrator.handle_phase_blocked(
+                    task,
+                    service_name=service_name,
+                    worker_name=worker_name,
+                    reason=event_type,
                 )
                 return True
 
@@ -441,6 +516,12 @@ class MariaDBTaskBackend:
                 f"Pushed {commit_result['working_branch']} to origin",
                 worker_name,
             )
+            self.phase_orchestrator.handle_phase_completion(
+                task,
+                service_name=service_name,
+                worker_name=worker_name,
+                result_summary=summary,
+            )
             return True
 
         completed = self.db.update_task_result(task.id, "running", "succeeded", summary)
@@ -454,12 +535,53 @@ class MariaDBTaskBackend:
             f"LLM response saved to {artifact_path}",
             worker_name,
         )
+        self.phase_orchestrator.handle_phase_completion(
+            task,
+            service_name=service_name,
+            worker_name=worker_name,
+            result_summary=summary,
+        )
         return True
+
+    @staticmethod
+    def _parse_review_state(response: str) -> str | None:
+        uppercase = response.upper()
+        if "NOT APPROVED" in uppercase:
+            return "rejected"
+        if "NOT REJECTED" in uppercase and "APPROVED" in uppercase:
+            return "approved"
+        if "REJECTED" in uppercase and "NOT REJECTED" not in uppercase:
+            return "rejected"
+        if "APPROVED" in uppercase:
+            return "approved"
+        return None
 
     def _get_llm_client(self):
         if self.llm_client is None:
             self.llm_client = LLMClient.from_environment()
         return self.llm_client
+
+    def _persist_phase_metadata(self, task, llm_client: Any, summary: str) -> None:
+        if not self.phase_orchestrator.is_orchestrated_task(task):
+            return
+        if not isinstance(task.payload_json, dict):
+            return
+
+        payload_json = dict(task.payload_json)
+        orchestration = dict(payload_json.get("orchestration") or {})
+        model_name = getattr(llm_client, "model", None)
+        orchestration["llm_model"] = model_name.strip() if isinstance(model_name, str) and model_name.strip() else orchestration.get("llm_model")
+        orchestration["phase_summary"] = summary or orchestration.get("phase_summary") or "-"
+        orchestration["handoff_message"] = self._build_handoff_message(summary)
+        payload_json["orchestration"] = orchestration
+        if not self.db.update_task_payload_json(task.id, payload_json):
+            raise TaskConsistencyError(f"task {task.id} payload could not be updated with phase metadata")
+        object.__setattr__(task, "payload_json", payload_json)
+
+    @staticmethod
+    def _build_handoff_message(summary: str) -> str:
+        stripped = summary.strip()
+        return stripped or "引き継ぎ事項なし"
 
     @staticmethod
     def _extract_instruction(payload_json: dict[str, Any] | None) -> str | None:
@@ -478,6 +600,14 @@ class MariaDBTaskBackend:
             "git commit / git push は実行するな。システム側で行う。",
             "リポジトリ外のファイルを編集するな。",
         ]
+        phase = getattr(task, "phase", None)
+        task_type = getattr(task, "task_type", None)
+        if phase is not None:
+            prompt_parts.append(f"Phase: {phase}")
+        if task_type:
+            prompt_parts.append(f"Task Type: {task_type}")
+        if phase in PHASE_PROMPT_CONTEXT:
+            prompt_parts.append(PHASE_PROMPT_CONTEXT[phase])
         if isinstance(task.payload_json, dict) and isinstance(task.payload_json.get("task"), str):
             prompt_parts.append(f"Task: {task.payload_json['task'].strip()}")
         if task.target_repo:

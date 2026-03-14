@@ -107,19 +107,28 @@
             <div id="task-detail-view" data-route="task-detail" hidden>
               <div class="detail-header">
                 <a class="ghost-link" href="#/tasks">一覧へ戻る</a>
-                <h3 id="task-detail-title">Task Detail</h3>
+                <h3 id="task-detail-title">タスク詳細</h3>
               </div>
               <dl id="task-detail-meta" class="detail-meta"></dl>
+              <section id="task-detail-instruction-panel" class="detail-block" hidden>
+                <h4>依頼本文</h4>
+                <pre id="task-detail-instruction" class="result-card detail-text-block detail-reading-panel"></pre>
+              </section>
+              <section id="task-subtasks-panel" class="detail-block" hidden>
+                <h4>サブタスク</h4>
+                <p id="task-subtasks-empty" class="task-empty" hidden>サブタスクはまだありません。</p>
+                <ul id="task-subtasks" class="subtask-list"></ul>
+              </section>
               <section class="detail-block">
-                <h4>Logs</h4>
+                <h4>ログ</h4>
                 <ul id="task-detail-logs" class="log-list"></ul>
               </section>
               <section class="detail-block">
-                <h4>Result</h4>
-                <article id="task-detail-result" class="result-card"></article>
+                <h4>結果</h4>
+                <article id="task-detail-result" class="result-card detail-reading-panel"></article>
               </section>
               <section id="task-approval-panel" class="detail-block" hidden>
-                <h4>Approval</h4>
+                <h4>承認</h4>
                 <div class="approval-actions">
                   <div class="approval-buttons">
                     <button id="task-approve" type="button">承認してマージ</button>

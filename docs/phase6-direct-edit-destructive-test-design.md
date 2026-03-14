@@ -258,7 +258,145 @@
 
 - 攻撃シナリオ: local `workspace_path` task（GitHub clone ではない）がバグにより `waiting_approval` に遷移する。Dashboard で approve を試みると merge target や working_branch がないため操作不能に陥る。
 - Red 条件: local task が `waiting_approval` に遷移し、task が進行不能のまま放置される。
+
+### DT-57: orchestration 一覧が child task を重複表示する
+
+- 攻撃シナリオ: Dashboard 一覧 API が root task と child task を同時に返し、1 件の orchestration が複数行に分裂して表示される。
+- Red 条件: 同一 `root_task_id` 配下の child task が一覧に現れ、進捗が「同じ失敗の繰り返し」に見える。
+- Green 条件: 一覧 API は `parent_task_id IS NULL` の root task のみを返し、child task は detail API の `subtasks` としてのみ表示される。
+
+### DT-58: phase 1 以降が phase 0 と同一 prompt で実行される
+
+- 攻撃シナリオ: prompt 生成器が `phase` と `task_type` を無視し、phase 0 と phase 1 以降で同一の汎用 instruction を返す。その結果、phase 1 が設計ではなく phase 0 と同じ壁打ちや実装を再実行する。
+- Red 条件: phase 0 / phase 1 の prompt が phase 固有ラベルや責務説明を含まず、事実上同一になる。
+- Green 条件: prompt に `phase` と phase 固有責務が含まれ、phase 1 では設計更新、phase 2 では破壊テスト設計、phase 3 では RED 作成を要求すること。
 - Green 条件: local task は `waiting_approval` を経由せず直接 `succeeded` へ遷移するか、コード上 `waiting_approval` への遷移条件が GitHub clone task 限定であることが保証されること。
+
+### DT-59: subtask アコーディオンの初期状態が expanded
+
+- 攻撃シナリオ: root task 詳細画面で subtask アコーディオンの初期状態が collapsed ではなく expanded で描画される。多数の phase task がある場合、詳細画面が長大になり、特定 subtask の確認に過度なスクロールが必要になる。
+- Red 条件: ページロード時に全 subtask アコーディオンが展開されており、「初期非展開」の設計意図に反する。
+- Green 条件: 全 subtask アコーディオンが初期状態で collapsed であること。ユーザーの明示的クリックでのみ展開されること。§2.7.6 item 3「初期状態ではすべて collapsed とする」が遵守されること。
+
+### DT-60: アコーディオンヘッダに LLM モデル名が表示されない
+
+- 攻撃シナリオ: subtask アコーディオンのヘッダに phase 番号、task_type、status は表示されるが、LLM モデル名が省略されている。ユーザーが全 subtask を個別に展開しないとモデル名を確認できない。
+- Red 条件: アコーディオンヘッダに `llm_model` が表示されない。
+- Green 条件: アコーディオンのヘッダに `llm_model` が表示されること。null / 空の場合は「N/A」または「-」を表示し、ヘッダが崩れないこと。§2.7.6 item 4「ヘッダには少なくとも phase 番号、task_type、status、LLM モデル名」が遵守されること。
+
+### DT-61: アコーディオン展開領域に handoff_message が表示されない
+
+- 攻撃シナリオ: subtask を展開しても handoff_message が描画されず、phase 間でどのような情報が伝達されたか確認できない。
+- Red 条件: 展開領域に `handoff_message` の表示領域が存在しないか、フィールド自体が描画されない。
+- Green 条件: 展開領域に `handoff_message` がラベル付きで表示されること。null / 空の場合は「引き継ぎ事項なし」等のプレースホルダを表示すること。§2.7.6 item 5「展開領域には phase_summary, handoff_message, result_summary_md, 主要ログを表示する」が遵守されること。
+
+### DT-62: root task 詳細画面にユーザー投稿本文が表示されない
+
+- 攻撃シナリオ: root task の詳細画面にユーザーが投稿した instruction が一切表示されず、タスクの目的を把握するには DB を直接参照するしかない。
+- Red 条件: 詳細画面に instruction / 依頼本文が表示されない。
+- Green 条件: root task の詳細画面に「依頼本文」としてユーザー投稿時の instruction が表示されること。§2.7.6 item 1「root task detail API は instruction を返し、詳細画面上で「依頼本文」として表示する」が遵守されること。
+
+### DT-63: subtask の llm_model が null / 空文字の場合にヘッダ描画が崩壊
+
+- 攻撃シナリオ: child task の `llm_model` が null または空文字列で保存される。フロントエンドのアコーディオンヘッダ生成処理が `null` テキストを表示するか、テンプレートリテラルで `undefined` が結合される。
+- Red 条件: ヘッダに `null` / `undefined` のリテラル文字列が表示される。
+- Green 条件: `llm_model` が null / undefined / 空文字の場合、ヘッダに「N/A」等のフォールバック表示を適用し、リテラルの null / undefined を描画しないこと。
+
+### DT-64: instruction の改行が保持されない
+
+- 攻撃シナリオ: ユーザーが複数行の instruction を投稿するが、フロントエンドが改行を無視して 1 行に結合表示する。依頼内容の構造が失われ、可読性が著しく低下する。
+- Red 条件: instruction 内の `\n` が無視され、テキストが 1 行で描画される。
+- Green 条件: instruction 表示領域で `white-space: pre-wrap` または同等の CSS が適用され、改行が保持されること。§3.1.1「表示時は改行保持を優先する」が遵守されること。
+
+### DT-65: handoff_message の改行が保持されない
+
+- 攻撃シナリオ: LLM が複数行の handoff_message を生成するが、アコーディオン展開領域で改行が無視され 1 行で描画される。
+- Red 条件: handoff_message 内の改行コードが無視され、テキストが 1 行に結合される。
+- Green 条件: handoff_message 表示領域で `white-space: pre-wrap` または同等の CSS が適用され、改行が保持されること。
+
+### DT-66: subtask が 0 件の root task で詳細画面がエラーにならない
+
+- 攻撃シナリオ: root task が作成直後で child task が 1 件も生成されていない状態（phase 0 生成前の瞬間、またはトランザクション失敗時）。detail API が空の `subtasks: []` を返し、フロントエンドが空配列のアコーディオン描画を安全に処理する必要がある。
+- Red 条件: subtasks が 0 件の場合にフロントエンドがエラーをスローするか、「undefined is not iterable」等の例外が発生する。
+- Green 条件: subtasks が空配列の場合、「サブタスクなし」等のプレースホルダを表示し、ページが正常動作すること。
+
+### DT-67: Dashboard detail の主要見出しが英語のまま表示される
+
+- 攻撃シナリオ: Dashboard task detail 画面のセクション見出しが `Subtasks`, `Phase Summary`, `Handoff Message`, `Result`, `Logs` の英語表記のまま描画され、日本語ベースの情報設計要件（§2.7.6 item 9）に反する。
+- Red 条件: detail 画面の主要見出しが英語のまま表示され、「依頼本文」「サブタスク」「引き継ぎ事項」「結果」「ログ」の日本語ラベルが適用されていない。
+- Green 条件: §2.7.6 item 9 に従い、主要見出しに日本語第一表記が適用されていること。英語メタデータ（phase 番号、model 名）は識別用途に限定されること。
+
+### DT-68: 依頼本文 / handoff message / result のテキストブロックが補助メタデータと同じスタイルで描画
+
+- 攻撃シナリオ: instruction、handoff_message、result_summary_md が、phase 番号・status・LLM model 名などの補助メタデータと同じフォントサイズ・余白・背景で描画される。視覚的な優先度が区別できず、ユーザーが「どこを読めばよいか」が即座に分からない。
+- Red 条件: テキストブロック（instruction / handoff / result）に補助メタデータと区別する専用スタイル（padding, background, border, line-height 差）が適用されていない。
+- Green 条件: §2.7.6 item 8 に従い、instruction / handoff_message / result_summary_md が他の補助情報より視覚的に強いテキストブロックとして配置され、読み始める場所が即座に分かること。
+
+### DT-69: テキストブロックの行間・余白が不十分で「読む領域」が分離されない
+
+- 攻撃シナリオ: テキストブロックに line-height: 1.0 や padding: 0 が適用（または未指定）され、テキストが密集して表示される。長文の instruction や handoff_message が読みにくい。
+- Red 条件: テキストブロックの line-height、padding が周囲のメタデータ表示と同等で、「読み物向けパネル」としての可読性改善がない。
+- Green 条件: §2.7.6 item 10「行間・padding・背景色・境界線・最大高さを調整した読み物向けパネル」が実装され、テキストブロックが明確に「読む領域」として分離されていること。NF-14 が遵守されること。
+
+### DT-70: テキストブロックの背景コントラスト不足
+
+- 攻撃シナリオ: instruction / handoff_message / result_summary_md の背景色が周囲のパネル背景色と同一または近似で、テキスト領域の境界が視覚的に不明瞭。ユーザーが本文領域の開始・終了を認識しづらい。
+- Red 条件: テキスト領域が周囲から背景色または境界線で分離されておらず、「ここが本文」が一目で分からない。
+- Green 条件: テキストブロックに周囲と十分に区別できる背景色または境界線が適用され、NF-14「背景コントラスト」の要件が遵守されること。
+
+### DT-71: subtask 展開領域の内部ラベルが英語のまま
+
+- 攻撃シナリオ: subtask アコーディオン展開領域内のフィールドラベルが `Phase Summary`, `Handoff Message`, `Result`, `Logs` の英語表記のまま。日本語ベースの UI/UX 要件に反する。
+- Red 条件: 展開領域のラベルに英語が使用されており、日本語ラベル（要約、引き継ぎ事項、結果、ログ）が適用されていない。
+- Green 条件: §2.7.6 item 11 に従い、展開領域の表示ラベルが「要約」「引き継ぎ事項」「結果」「ログ」に置換されていること。NF-15 が遵守されること。
+
+### DT-72: empty state / helper text が英語で表示される
+
+- 攻撃シナリオ: subtask なし時に "No subtasks" / "No data available"、handoff なし時に "No handoff message"、エラー時に "Error loading data" 等の英語テキストが表示される。
+- Red 条件: empty state、helper text、プレースホルダに英語テキストが使用されている。
+- Green 条件: §2.7.6 item 12「empty state と helper text は日本語で記述し、エラー時も英語由来の内部用語をそのまま露出しない」が遵守されていること。
+
+### DT-73: detail 画面の情報階層が設計順序に従わない
+
+- 攻撃シナリオ: detail 画面のセクション順が「ログ → 依頼本文 → サブタスク」や「結果 → 概要 → サブタスク」のように設計で定めた情報階層に反する。日本語の自然な読み順に合わないため、ユーザーが情報を追跡しにくい。
+- Red 条件: detail 画面のセクション表示順が「概要 → 依頼本文 → サブタスク → ログ/結果」に従っていない。
+- Green 条件: NF-16「root detail と subtask detail の情報階層は概要 → 依頼本文 → サブタスク → ログ/結果の順で安定させる」が遵守されていること。
+
+### DT-74: エラー表示で英語由来の内部用語がそのまま露出する
+
+- 攻撃シナリオ: API エラー応答時に `working_branch_not_found`、`merge_target_not_found`、`orchestration_payload_invalid` 等の内部エラーコードがモーダルダイアログやメッセージ領域にそのまま表示される。
+- Red 条件: ユーザー向けメッセージにサニタイズされていない英語内部用語が露出し、エラー内容を日本語で理解できない。
+- Green 条件: §2.7.6 item 12 に従い、エラー時もユーザー向けメッセージは日本語で記述し、英語由来の内部用語はログにのみ記録すること。
+
+### DT-75: `.detail-reading-panel` の背景色と本文文字色が近似
+
+- 攻撃シナリオ: `.detail-reading-panel` の `background` と `color` が同系色（例: 背景 `#f8f1e3` に対して本文 `#a89270` など明度差が小さい色）で描画される。依頼本文・引き継ぎ事項・結果の長文テキストが背景に埋もれ、内容を判読できない。
+- Red 条件: `.detail-reading-panel` の CSS で `background` と `color` が定義されておらず UA 既定に依存する、または background と color のコントラスト比が 4.5:1 未満の近似色ペアで指定されている。
+- Green 条件: `.detail-reading-panel` の CSS で `color` に十分に濃い色（例: `#3a2f22` 相当の暗色）を明示的に指定し、`background` に白寄りまたは淡色（例: `#faf6ef` 相当）を指定すること。§2.7.6 item 13「本文レイヤは濃色文字、背景は白寄りまたは淡色寄りに固定」が遵守されること。
+
+### DT-76: 見出し・本文・補助文言の色階層が未分離
+
+- 攻撃シナリオ: `.detail-section-title`（見出し）と `.detail-reading-panel`（本文）と補助メタデータ（`.detail-meta dt` / badge 類）がすべて同一の `color` 値で描画される。結果として色階層が存在せず、ユーザーが「まず見出しを見つけ → 本文を読み → 補助情報を参照する」という段階的な読み順を取れない。
+- Red 条件: `.detail-section-title` と `.detail-reading-panel` と補助メタデータの `color` 値が同一、または 3 者間の明度差が実質的にゼロで階層として機能していない。
+- Green 条件: 見出し（`.detail-section-title`）は本文より強い色、本文は補助文言・メタラベルより濃い色、補助文言は背景に埋もれない程度の弱い色を持ち、3 層の色階層として機能すること。§2.7.6 item 13「見出しは本文よりさらに強い色で視点の起点を作る」§1.1 NF-17 が遵守されること。
+
+### DT-77: hover / focus 状態で本文色が背景に近づく
+
+- 攻撃シナリオ: `.detail-reading-panel:hover` や `:focus-within` で `color` を薄くする、または `opacity` を下げる CSS ルールが適用され、ホバー中に本文の可読性が低下する。ユーザーがポインタを含む読み物ではマウスが常にパネル上にあるため、読んでいる間ずっとコントラストが劣化する。
+- Red 条件: `.detail-reading-panel` の hover / focus 擬似クラスで `color` が薄色へ変更される、または `opacity < 0.8` が適用されて本文コントラストが低下する。
+- Green 条件: hover / focus の視覚差は border、shadow、surface tint（background の微調整）で表現し、`color`（本文文字色）は通常時と同値を維持すること。§2.7.6 item 14「hover や active 相当の状態変化が入る場合も本文色は維持する」§1.1 NF-18 が遵守されること。
+
+### DT-78: disabled 表示で本文が読めなくなる
+
+- 攻撃シナリオ: task が `succeeded` / `blocked` に遷移した後の detail 画面で、読み物パネルに `opacity: 0.3` や `color: #ccc` 相当の disabled スタイルが適用され、完了済みタスクの instruction / handoff_message / result が判読困難になる。
+- Red 条件: disabled 相当の表示で `.detail-reading-panel` の本文コントラストが通常時より大幅に低下し、テキスト内容を読めない。
+- Green 条件: disabled 表示でもテキスト内容は読めること。操作不能を示す視覚手段として border の薄色化や surface tint のグレー化を用い、本文文字色そのものは `opacity: 0.65` 以上を維持すること。§2.7.6 item 14「disabled 表示では本文を薄くしすぎず、操作不能であっても内容は読めることを優先する」が遵守されること。
+
+### DT-79: `.detail-reading-panel` の border / shadow が本文色と競合
+
+- 攻撃シナリオ: `.detail-reading-panel` の `border` や `box-shadow` に本文テキストと同じ濃色が使われ、パネル装飾とテキストが溶け合って可読性を損なう。あるいは `box-shadow` が大きすぎてテキスト端が影に埋もれる。
+- Red 条件: `border-color` や `box-shadow` の色が本文 `color` と同値で、視覚的にテキストと装飾が区別しにくい。
+- Green 条件: border / shadow は本文色より控えめな色（中間色や淡色）を使い、テキストと装飾が競合しないこと。§2.7.6 item 14「border / shadow / background は本文色と競合しない控えめな装飾」が遵守されること。
 
 ### DT-38: approve 処理中に GITHUB_TOKEN が失効
 
@@ -410,6 +548,32 @@
 24. **DB 保存値の安全性**: target_ref の NULL / 空 / 不正値に対して approve / diff 処理が安全に失敗すること（DT-52）。
 25. **UI 整合性**: 承認画面に merge-target select が存在せず、task detail に URL / ブランチが表示され、投稿フォームでブランチコンボボックスが動作すること（DT-53〜56）。
 
+### 3.4 Dashboard detail / subtask アコーディオン（DT-59〜DT-66）
+
+26. **アコーディオン初期状態**: 全 subtask が初期状態で collapsed であり、明示クリックでのみ展開されること（DT-59）。
+27. **ヘッダ表示**: アコーディオンヘッダに phase 番号、task_type、status、LLM モデル名が表示されること。null / 空の llm_model は「N/A」で表示されること（DT-60, DT-63）。
+28. **展開領域**: 展開時に handoff_message、phase_summary、result_summary_md、主要ログが表示されること（DT-61）。
+29. **instruction 表示**: root task 詳細に「依頼本文」が表示され、改行が保持されること（DT-62, DT-64）。
+30. **改行保持**: instruction と handoff_message の改行コードが UI 上で保持されること（DT-64, DT-65）。
+31. **空 subtasks 耐性**: subtasks が 0 件の root task で詳細画面がエラーにならないこと（DT-66）。
+
+### 3.5 可読性・日本語 UX（DT-67〜DT-74）
+
+32. **日本語見出し**: detail 画面の主要見出しが「依頼本文」「サブタスク」「引き継ぎ事項」「結果」「ログ」の日本語第一表記であること。英語ラベルが残存していないこと（DT-67）。
+33. **テキストブロック視覚的分離**: instruction / handoff_message / result_summary_md が補助メタデータと異なる専用スタイル（padding, background, border, line-height）で描画されること（DT-68）。
+34. **読み物向けパネル**: テキストブロックの行間・余白・背景色・境界線が「読む領域」として明確に分離されていること（DT-69, DT-70）。
+35. **subtask 展開ラベル日本語化**: subtask アコーディオン展開領域のラベルが「要約」「引き継ぎ事項」「結果」「ログ」に置換されていること（DT-71）。
+36. **日本語 empty state**: empty state、helper text、プレースホルダが日本語で記述されていること。エラー時に英語内部用語が露出しないこと（DT-72, DT-74）。
+37. **情報階層順序**: detail 画面の表示順が「概要 → 依頼本文 → サブタスク → ログ/結果」に従っていること（DT-73）。
+
+### 3.6 コントラスト・色階層（DT-75〜DT-79）
+
+38. **パネル本文コントラスト**: `.detail-reading-panel` の `color` と `background` が明示的に指定され、十分なコントラスト差を持つこと。背景に埋もれないこと（DT-75）。
+39. **色階層分離**: `.detail-section-title`（見出し）、`.detail-reading-panel`（本文）、補助メタデータの `color` が 3 層の階層として機能し、同一色に崩壊していないこと（DT-76）。
+40. **hover/focus 耐性**: hover / focus 状態で本文文字色が変更されず、コントラストが維持されること（DT-77）。
+41. **disabled 耐性**: disabled 相当の表示でも本文テキストが読め、opacity が極端に低下しないこと（DT-78）。
+42. **装飾と本文の非競合**: border / shadow の色が本文色と競合せず、控えめに分離されていること（DT-79）。
+
 ## 4. 設計へのフィードバック
 
 本書で以下の設計上の未確定事項を確定する:
@@ -438,6 +602,22 @@
 - **DT-50 確定**: approve API は request body から merge_target / target_ref フィールドを読み取らない。approve 処理は DB から task を取得し、保存済み target_ref のみを使用する。
 - **DT-51 確定**: diff API はクエリパラメータ `target` を読み取らない。DB から task を取得し、保存済み target_ref のみを比較対象とする。
 
+### 4.4 Dashboard detail / subtask アコーディオン
+
+- **DT-59 確定**: subtask アコーディオンは HTML 描画時に `collapsed` クラスまたは `<details>` 要素の `open` 属性なしで生成し、初期状態で全 item を非展開とする。
+- **DT-60/63 確定**: `llm_model` が null / undefined / 空文字の場合、ヘッダには `"N/A"` をフォールバック表示する。テンプレートリテラルで null が結合されないよう `|| 'N/A'` ガードを適用する。
+- **DT-61 確定**: アコーディオン展開領域には `handoff_message` をラベル付きで必ず表示する。null / 空の場合は `"引き継ぎ事項なし"` を表示する。
+- **DT-62 確定**: root task 詳細画面に「依頼本文」セクションを設け、`instruction` を `textContent` + `white-space: pre-wrap` で表示する。
+- **DT-64/65 確定**: instruction と handoff_message の表示領域に `white-space: pre-wrap` を適用し、改行を保持する。innerHTML ではなく textContent で描画する。
+- **DT-66 確定**: subtasks が空配列の場合、フロントエンドは「サブタスクなし」のプレースホルダを表示し、undefined / null イテレーションによるクラッシュを防止する。
+
+### 4.5 可読性・日本語 UX
+
+- **DT-67/71 確定**: 主要見出しは日本語第一表記とする。root detail のセクション見出しは「依頼本文」「サブタスク」。subtask 展開領域のフィールドラベルは「要約」「引き継ぎ事項」「結果」「ログ」とする。英語は phase 番号・LLM model 名等の識別用途に限定する。
+- **DT-68/69/70 確定**: instruction / handoff_message / result_summary_md のテキストブロックには、周囲の補助メタデータと区別する専用 CSS クラスを適用する。少なくとも line-height: 1.6 以上、padding: 12px 以上、背景色または 1px 境界線で分離し、「読み物向けパネル」として設計する。既存の `.detail-text-block` を拡張または上書きする。
+- **DT-72/74 確定**: empty state は日本語で記述する。少なくとも「サブタスクなし」「引き継ぎ事項なし」「結果なし」「ログなし」を準備する。API エラーコード（`working_branch_not_found` 等）はユーザー向け表示時に日本語メッセージへ変換し、内部用語は `console.error` / ログにのみ出力する。
+- **DT-73 確定**: root detail の情報階層は「概要（status / repository / branch 等のメタ情報） → 依頼本文（instruction） → サブタスク（accordion） → 承認パネル」の順とする。subtask 展開領域の内部順は「要約 → 引き継ぎ事項 → 結果 → ログ」とする。
+
 ## 5. 関連ドキュメント
 
 1. `docs/phase6-direct-edit-design.md`
@@ -445,4 +625,11 @@
 3. `docs/phase5-artifact-apply-destructive-test-design.md` (旧破壊テスト・参考)
 4. `docs/phase4-llm-integration-design.md`
 5. `docs/phase4-llm-integration-destructive-test-design.md`
+### 4.6 コントラスト・色階層
+
+- **DT-75 確定**: `.detail-reading-panel` は `color` に濃色（`#3a2f22` 相当）、`background` に淡色（`#faf6ef` 相当）を明示指定する。UA 既定に依存しない。色の選択は §2.7.6 item 13 の配色トークン分離に従い、「本文レイヤは濃色文字、背景は白寄り」を固守する。
+- **DT-76 確定**: `.detail-section-title` は `color: var(--accent-strong)` 相当で本文よりさらに強い色とする。補助メタデータ（`--muted` 系）は本文より弱いが背景に埋もれない色とする。3 層の色階層: 見出し > 本文 > 補助文言を CSS カスタムプロパティまたは直値で維持する。
+- **DT-77/78 確定**: hover / focus / disabled の視覚差は `border-color`、`box-shadow`、`background`（surface tint）のみで表現する。`color`（本文文字色）は通常時と同値を維持し、hover 等で変更しない。disabled 時の `opacity` は 0.65 以上を保証し、テキスト内容を読めることを優先する。
+- **DT-79 確定**: `border-color` と `box-shadow` に本文 `color` と同値の濃色を使わず、中間色または淡色で装飾する。
+
 6. `.tdd_protocol.md`

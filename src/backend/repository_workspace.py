@@ -103,7 +103,7 @@ class RepositoryWorkspaceManager:
         repo_path = self._repo_path(workspace_path)
         self._require_working_branch(working_branch)
         try:
-            self._invoke_git(["git", "fetch", "origin", "--prune"], repo_path)
+            self._invoke_git_with_origin_auth(["git", "fetch", "origin", "--prune"], repo_path)
             self._resolve_working_branch_ref(repo_path, working_branch)
             output = self._invoke_git_capture(["git", "branch", "-r", "--format=%(refname:short)"], repo_path)
         except Exception as error:
@@ -163,7 +163,7 @@ class RepositoryWorkspaceManager:
         self._ensure_local_working_branch(repo_path, working_branch)
 
         try:
-            self._invoke_git(["git", "fetch", "origin", merge_target], repo_path)
+            self._invoke_git_with_origin_auth(["git", "fetch", "origin", merge_target], repo_path)
             if self._local_branch_exists(repo_path, merge_target):
                 self._invoke_git(["git", "checkout", merge_target], repo_path)
                 self._invoke_git(["git", "merge", "--ff-only", f"origin/{merge_target}"], repo_path)
@@ -233,9 +233,13 @@ class RepositoryWorkspaceManager:
         try:
             if not repo_path.exists():
                 self._invoke_git(self._with_github_auth(["git", "clone", clone_url, str(repo_path)], clone_url), workspace_root)
+            self._invoke_git_with_origin_auth(["git", "fetch", "origin", "--prune"], repo_path, fallback_remote_url=clone_url)
 
-            self._invoke_git(["git", "checkout", target_ref], repo_path)
-            self._invoke_git(["git", "checkout", "-B", working_branch], repo_path)
+            if self._remote_branch_exists(repo_path, working_branch):
+                self._invoke_git(["git", "checkout", "-B", working_branch, f"origin/{working_branch}"], repo_path)
+            else:
+                self._invoke_git(["git", "checkout", target_ref], repo_path)
+                self._invoke_git(["git", "checkout", "-B", working_branch, target_ref], repo_path)
         except Exception as error:
             raise RepositoryPreparationError(self._stringify_git_error(error)) from error
         return {
@@ -257,6 +261,19 @@ class RepositoryWorkspaceManager:
         if isinstance(stdout, bytes):
             return stdout.decode("utf-8", errors="replace")
         return str(stdout or "")
+
+    def _origin_remote_url(self, repo_path: Path, fallback_remote_url: str | None = None) -> str:
+        try:
+            remote_url = self._invoke_git_capture(["git", "remote", "get-url", "origin"], repo_path).strip()
+        except Exception:
+            if fallback_remote_url is None:
+                raise
+            return fallback_remote_url
+        return remote_url or (fallback_remote_url or "")
+
+    def _invoke_git_with_origin_auth(self, args: list[str], cwd: Path, fallback_remote_url: str | None = None) -> None:
+        remote_url = self._origin_remote_url(cwd, fallback_remote_url=fallback_remote_url)
+        self._invoke_git(self._with_github_auth(args, remote_url), cwd)
 
     @staticmethod
     def _extract_unified_diff(artifact_body: str) -> str:
@@ -388,7 +405,7 @@ class RepositoryWorkspaceManager:
 
     def _assert_remote_branch_exists(self, repo_path: Path, merge_target: str) -> None:
         try:
-            self._invoke_git(["git", "fetch", "origin", merge_target], repo_path)
+            self._invoke_git_with_origin_auth(["git", "fetch", "origin", merge_target], repo_path)
             self._invoke_git(["git", "rev-parse", "--verify", f"origin/{merge_target}"], repo_path)
         except Exception as error:
             raise CommitPushError(f"merge_target_not_found: {self._stringify_git_error(error)}") from error
@@ -397,7 +414,7 @@ class RepositoryWorkspaceManager:
         if self._local_branch_exists(repo_path, working_branch):
             return working_branch
         try:
-            self._invoke_git(["git", "fetch", "origin", working_branch], repo_path)
+            self._invoke_git_with_origin_auth(["git", "fetch", "origin", working_branch], repo_path)
             self._invoke_git(["git", "rev-parse", "--verify", f"origin/{working_branch}"], repo_path)
         except Exception as error:
             raise CommitPushError("working_branch_not_found") from error
@@ -415,6 +432,13 @@ class RepositoryWorkspaceManager:
     def _local_branch_exists(self, repo_path: Path, branch_name: str) -> bool:
         try:
             self._invoke_git(["git", "rev-parse", "--verify", branch_name], repo_path)
+        except Exception:
+            return False
+        return True
+
+    def _remote_branch_exists(self, repo_path: Path, branch_name: str) -> bool:
+        try:
+            self._invoke_git(["git", "rev-parse", "--verify", f"origin/{branch_name}"], repo_path)
         except Exception:
             return False
         return True

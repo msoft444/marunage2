@@ -61,7 +61,10 @@ class FakeMariaDBConnection:
         self.tasks = {
             1: {
                 "id": 1,
+                "parent_task_id": None,
                 "root_task_id": 1,
+                "task_type": "documentation",
+                "phase": 4,
                 "status": "queued",
                 "lease_owner": None,
                 "lease_expires_at": None,
@@ -78,7 +81,10 @@ class FakeMariaDBConnection:
             },
             2: {
                 "id": 2,
+                "parent_task_id": None,
                 "root_task_id": 2,
+                "task_type": "documentation",
+                "phase": 4,
                 "status": "blocked",
                 "lease_owner": None,
                 "lease_expires_at": None,
@@ -95,7 +101,10 @@ class FakeMariaDBConnection:
             },
             3: {
                 "id": 3,
+                "parent_task_id": None,
                 "root_task_id": 3,
+                "task_type": "documentation",
+                "phase": 4,
                 "status": "blocked",
                 "lease_owner": None,
                 "lease_expires_at": None,
@@ -137,6 +146,28 @@ class FakeMariaDBConnection:
         self.statements.append((normalized, tuple(params)))
         if normalized == "SELECT 1":
             return FakeCursor([{"value": 1}], 1)
+        if normalized.startswith("SELECT id, parent_task_id, root_task_id, task_type, phase, status, assigned_service, priority, payload_json, workspace_path, target_repo, target_ref, working_branch, approval_required, result_summary_md FROM tasks WHERE id = %s FOR UPDATE"):
+            selected = self.tasks.get(params[0])
+            task = None
+            if selected is not None:
+                task = {
+                    "id": selected["id"],
+                    "parent_task_id": selected.get("parent_task_id"),
+                    "root_task_id": selected["root_task_id"],
+                    "task_type": selected.get("task_type", "documentation"),
+                    "phase": selected.get("phase", 4),
+                    "status": selected["status"],
+                    "assigned_service": selected["assigned_service"],
+                    "priority": selected["priority"],
+                    "payload_json": selected.get("payload_json"),
+                    "workspace_path": selected.get("workspace_path"),
+                    "target_repo": selected.get("target_repo"),
+                    "target_ref": selected.get("target_ref"),
+                    "working_branch": selected.get("working_branch"),
+                    "approval_required": selected.get("approval_required", False),
+                    "result_summary_md": selected.get("result_summary_md"),
+                }
+            return FakeCursor([task] if task else [], 1 if task else 0)
         if "FROM tasks WHERE id = %s FOR UPDATE" in normalized:
             task = None
             selected = self.tasks.get(params[0])
@@ -177,7 +208,10 @@ class FakeMariaDBConnection:
                 selected = candidates[0]
                 task = {
                     "id": selected["id"],
+                    "parent_task_id": selected.get("parent_task_id"),
                     "root_task_id": selected["root_task_id"],
+                    "task_type": selected.get("task_type", "documentation"),
+                    "phase": selected.get("phase", 4),
                     "status": selected["status"],
                     "assigned_service": selected["assigned_service"],
                     "priority": selected["priority"],
@@ -187,19 +221,54 @@ class FakeMariaDBConnection:
                     "target_ref": selected.get("target_ref"),
                     "working_branch": selected.get("working_branch"),
                     "approval_required": selected.get("approval_required", False),
+                    "result_summary_md": selected.get("result_summary_md"),
                 }
             return FakeCursor([task] if task else [], 1 if task else 0)
-        if normalized.startswith("SELECT id, root_task_id, task_type, status, assigned_service, priority, workspace_path, target_repo, target_ref, working_branch, result_summary_md, created_at FROM tasks ORDER BY created_at DESC, id DESC LIMIT 50"):
+        if normalized.startswith("SELECT id, parent_task_id, root_task_id, task_type, phase, status, assigned_service, priority, payload_json, workspace_path, target_repo, target_ref, working_branch, approval_required, result_summary_md FROM tasks WHERE root_task_id = %s AND phase = %s"):
+            root_task_id, phase = params
+            candidates = [
+                task for task in self.tasks.values()
+                if task["root_task_id"] == root_task_id and task.get("phase") == phase and task["status"] in {"queued", "leased", "running", "waiting_approval"}
+            ]
+            candidates.sort(key=lambda task: task["id"], reverse=True)
+            if not candidates:
+                return FakeCursor([], 0)
+            selected = candidates[0]
+            return FakeCursor([
+                {
+                    "id": selected["id"],
+                    "parent_task_id": selected.get("parent_task_id"),
+                    "root_task_id": selected["root_task_id"],
+                    "task_type": selected.get("task_type", "documentation"),
+                    "phase": selected.get("phase", 4),
+                    "status": selected["status"],
+                    "assigned_service": selected["assigned_service"],
+                    "priority": selected["priority"],
+                    "payload_json": selected.get("payload_json"),
+                    "workspace_path": selected.get("workspace_path"),
+                    "target_repo": selected.get("target_repo"),
+                    "target_ref": selected.get("target_ref"),
+                    "working_branch": selected.get("working_branch"),
+                    "approval_required": selected.get("approval_required", False),
+                    "result_summary_md": selected.get("result_summary_md"),
+                }
+            ], 1)
+        if normalized.startswith("SELECT id, parent_task_id, root_task_id, task_type, phase, status, assigned_service, priority, payload_json, workspace_path, target_repo, target_ref, working_branch, result_summary_md, created_at FROM tasks WHERE parent_task_id IS NULL ORDER BY created_at DESC, id DESC LIMIT 50"):
             rows = []
             for task in sorted(self.tasks.values(), key=lambda item: item["id"], reverse=True):
+                if task.get("parent_task_id") is not None:
+                    continue
                 rows.append(
                     {
                         "id": task["id"],
+                        "parent_task_id": task.get("parent_task_id"),
                         "root_task_id": task["root_task_id"],
                         "task_type": task.get("task_type", "documentation"),
+                        "phase": task.get("phase", 4),
                         "status": task["status"],
                         "assigned_service": task["assigned_service"],
                         "priority": task["priority"],
+                        "payload_json": task.get("payload_json"),
                         "workspace_path": task.get("workspace_path"),
                         "target_repo": task.get("target_repo"),
                         "target_ref": task.get("target_ref"),
@@ -209,7 +278,7 @@ class FakeMariaDBConnection:
                     }
                 )
             return FakeCursor(rows, len(rows))
-        if normalized.startswith("SELECT id, root_task_id, task_type, phase, status, requested_by_role, assigned_role, assigned_service, priority, workspace_path, target_repo, target_ref, working_branch, payload_json, result_summary_md, lease_owner, lease_expires_at, started_at, finished_at, created_at FROM tasks WHERE id = %s"):
+        if normalized.startswith("SELECT id, parent_task_id, root_task_id, task_type, phase, status, requested_by_role, assigned_role, assigned_service, priority, workspace_path, target_repo, target_ref, working_branch, payload_json, result_summary_md, lease_owner, lease_expires_at, started_at, finished_at, created_at FROM tasks WHERE id = %s"):
             selected = self.tasks.get(params[0])
             if selected is None:
                 return FakeCursor([], 0)
@@ -217,6 +286,7 @@ class FakeMariaDBConnection:
                 [
                     {
                         "id": selected["id"],
+                        "parent_task_id": selected.get("parent_task_id"),
                         "root_task_id": selected["root_task_id"],
                         "task_type": selected.get("task_type", "documentation"),
                         "phase": selected.get("phase", 4),
@@ -240,6 +310,32 @@ class FakeMariaDBConnection:
                 ],
                 1,
             )
+        if normalized.startswith("SELECT id, parent_task_id, root_task_id, task_type, phase, status, assigned_service, priority, payload_json, workspace_path, target_repo, target_ref, working_branch, result_summary_md, created_at FROM tasks WHERE root_task_id = %s AND id != %s ORDER BY phase ASC, id ASC"):
+            root_task_id, excluded_id = params
+            rows = []
+            for task in sorted(self.tasks.values(), key=lambda item: (item.get("phase", 4), item["id"])):
+                if task["root_task_id"] != root_task_id or task["id"] == excluded_id:
+                    continue
+                rows.append(
+                    {
+                        "id": task["id"],
+                        "parent_task_id": task.get("parent_task_id"),
+                        "root_task_id": task["root_task_id"],
+                        "task_type": task.get("task_type", "documentation"),
+                        "phase": task.get("phase", 4),
+                        "status": task["status"],
+                        "assigned_service": task["assigned_service"],
+                        "priority": task["priority"],
+                        "payload_json": task.get("payload_json"),
+                        "workspace_path": task.get("workspace_path"),
+                        "target_repo": task.get("target_repo"),
+                        "target_ref": task.get("target_ref"),
+                        "working_branch": task.get("working_branch"),
+                        "result_summary_md": task.get("result_summary_md"),
+                        "created_at": task.get("created_at", f"t{task['id']}"),
+                    }
+                )
+            return FakeCursor(rows, len(rows))
         if normalized.startswith("SELECT task_id, root_task_id, service, event_type, message, created_at FROM logs WHERE task_id = %s ORDER BY id ASC"):
             task_id = params[0]
             rows = []
@@ -317,8 +413,9 @@ class FakeMariaDBConnection:
             task["lease_expires_at"] = None
             task["started_at"] = None
             return FakeCursor([], 1)
-        if normalized.startswith("INSERT INTO tasks (root_task_id, task_type, phase, status, requested_by_role, assigned_role, assigned_service, priority, workspace_path, target_repo, target_ref, working_branch, payload_json, retry_count, max_retry, approval_required) VALUES"):
+        if normalized.startswith("INSERT INTO tasks (parent_task_id, root_task_id, task_type, phase, status, requested_by_role, assigned_role, assigned_service, priority, workspace_path, target_repo, target_ref, working_branch, payload_json, retry_count, max_retry, approval_required) VALUES"):
             (
+            parent_task_id,
                 root_task_id,
                 task_type,
                 phase,
@@ -340,6 +437,7 @@ class FakeMariaDBConnection:
             self._next_task_id += 1
             self.tasks[task_id] = {
                 "id": task_id,
+                "parent_task_id": parent_task_id,
                 "root_task_id": root_task_id,
                 "status": status,
                 "lease_owner": None,
@@ -372,6 +470,11 @@ class FakeMariaDBConnection:
             task["target_repo"] = target_repo
             task["target_ref"] = target_ref
             task["working_branch"] = working_branch
+            task["payload_json"] = json.loads(payload_json)
+            return FakeCursor([], 1)
+        if normalized.startswith("UPDATE tasks SET payload_json = %s WHERE id = %s"):
+            payload_json, task_id = params
+            task = self.tasks[task_id]
             task["payload_json"] = json.loads(payload_json)
             return FakeCursor([], 1)
         if normalized == "UPDATE tasks SET status = 'queued' WHERE status = 'blocked'":

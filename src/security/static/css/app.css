@@ -216,6 +216,12 @@ select:disabled {
   color: var(--muted);
 }
 
+.detail-section-title {
+  margin: 0;
+  color: var(--accent-strong);
+  letter-spacing: 0.04em;
+}
+
 .task-list,
 .log-list {
   list-style: none;
@@ -255,6 +261,93 @@ select:disabled {
 .detail-block {
   display: grid;
   gap: 12px;
+}
+
+.detail-text-block {
+  white-space: pre-wrap;
+  overflow-y: auto;
+  max-height: 300px;
+}
+
+.detail-reading-panel {
+  padding: 18px;
+  line-height: 1.6;
+  color: #3a2f22;
+  background: #faf6ef;
+  border: 1px solid #d5c3a5;
+  box-shadow: 0 0 0 1px rgba(134, 110, 74, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.82);
+}
+
+.detail-reading-panel p {
+  margin: 0;
+  color: inherit;
+  line-height: 1.6;
+}
+
+.detail-reading-panel:hover,
+.detail-reading-panel:focus-within {
+  background: #fdfaf4;
+  border-color: #c5ae87;
+  box-shadow: 0 12px 24px rgba(110, 91, 60, 0.08), 0 0 0 1px rgba(134, 110, 74, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.92);
+}
+
+.detail-reading-panel.is-disabled {
+  opacity: 0.72;
+  background: #f4ede2;
+  border-color: #d7c9b4;
+  box-shadow: 0 0 0 1px rgba(134, 110, 74, 0.05), inset 0 1px 0 rgba(255, 255, 255, 0.7);
+}
+
+.subtask-list {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.subtask-item {
+  border-radius: 14px;
+  border: 1px solid rgba(214, 201, 178, 0.9);
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.subtask-accordion {
+  border-radius: 14px;
+  overflow: hidden;
+}
+
+.subtask-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  padding: 14px 16px;
+  cursor: pointer;
+  list-style: none;
+  font-weight: 700;
+}
+
+.subtask-summary::-webkit-details-marker {
+  display: none;
+}
+
+.subtask-details-grid {
+  display: grid;
+  gap: 12px;
+  padding: 0 16px 16px;
+}
+
+.detail-text-group {
+  display: grid;
+  gap: 8px;
+}
+
+.detail-text-group h5 {
+  margin: 0;
+  color: var(--accent-strong);
+}
+
+.subtask-details-grid .detail-text-block {
+  max-height: 400px;
 }
 
 .task-status-blocked {
@@ -338,7 +431,8 @@ select:disabled {
   .hero-stats,
   .panel-grid,
   .workspace-grid,
-  .detail-meta {
+  .detail-meta,
+  .subtask-summary {
     grid-template-columns: 1fr;
   }
 

@@ -183,6 +183,13 @@ class SecureDashboard:
             payload_json["repository_path"] = repository_context["repository_path"]
             if repository_context["requires_clone"]:
                 payload_json["phase_flow"] = [0, 1, 2, 3, 4, 5]
+                payload_json["orchestration"] = {
+                    "phase_flow": [0, 1, 2, 3, 4, 5],
+                    "current_phase": 0,
+                    "last_completed_phase": None,
+                    "phase_attempt": 0,
+                    "final_review_state": "pending",
+                }
                 payload_json["repository_source"] = "github_url"
         payload_json["security_scan"] = {
             "blocked": scan_result["blocked"],
@@ -193,73 +200,198 @@ class SecureDashboard:
 
         with self._database() as connection:
             cursor = self._cursor(connection)
-            cursor.execute(
-                (
-                    "INSERT INTO tasks ("
-                    "root_task_id, task_type, phase, status, requested_by_role, assigned_role, assigned_service, "
-                    "priority, workspace_path, target_repo, target_ref, working_branch, payload_json, retry_count, max_retry, approval_required"
-                    ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
-                ),
-                (
-                    0,
-                    task_type,
-                    phase,
-                    task_status,
-                    "dashboard",
-                    assigned_role,
-                    assigned_service,
-                    priority,
-                    repository_context["workspace_path"] if repository_context else None,
-                    repository_context["target_repo"] if repository_context else None,
-                    repository_context["target_ref"] if repository_context else None,
-                    repository_context["working_branch"] if repository_context else None,
-                    json.dumps(payload_json, ensure_ascii=False),
-                    0,
-                    3,
-                    bool(repository_context and repository_context["requires_clone"]),
-                ),
-            )
-            task_id = self._last_insert_id(cursor, connection)
-            repository_context = self._finalize_repository_context(task_id, repository_context)
-            if repository_context is not None:
-                payload_json["repository_path"] = repository_context["repository_path"]
-                if repository_context["requires_clone"]:
+            begin = getattr(connection, "begin", None)
+            if callable(begin):
+                begin()
+            try:
+                if repository_context and repository_context["requires_clone"]:
+                    cursor.execute(
+                        (
+                            "INSERT INTO tasks ("
+                            "parent_task_id, root_task_id, task_type, phase, status, requested_by_role, assigned_role, assigned_service, "
+                            "priority, workspace_path, target_repo, target_ref, working_branch, payload_json, retry_count, max_retry, approval_required"
+                            ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                        ),
+                        (
+                            None,
+                            0,
+                            "phase_orchestration_root",
+                            0,
+                            "running",
+                            "dashboard",
+                            assigned_role,
+                            assigned_service,
+                            priority,
+                            None,
+                            repository_context["target_repo"],
+                            repository_context["target_ref"],
+                            None,
+                            json.dumps(payload_json, ensure_ascii=False),
+                            0,
+                            3,
+                            True,
+                        ),
+                    )
+                    task_id = self._last_insert_id(cursor, connection)
+                    repository_context = self._finalize_repository_context(task_id, repository_context)
+                    payload_json["repository_path"] = repository_context["repository_path"]
                     payload_json["clone_destination"] = f"{repository_context['workspace_path']}/repo"
-            cursor.execute(
-                (
-                    "UPDATE tasks SET root_task_id = %s, workspace_path = %s, target_repo = %s, target_ref = %s, working_branch = %s, payload_json = %s "
-                    "WHERE id = %s"
-                ),
-                (
-                    task_id,
-                    repository_context["workspace_path"] if repository_context else None,
-                    repository_context["target_repo"] if repository_context else None,
-                    repository_context["target_ref"] if repository_context else None,
-                    repository_context["working_branch"] if repository_context else None,
-                    json.dumps(payload_json, ensure_ascii=False),
-                    task_id,
-                ),
-            )
-            cursor.execute(
-                (
-                    "INSERT INTO logs (task_id, root_task_id, service, component, level, event_type, message, details_json, trace_id) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
-                ),
-                (
-                    task_id,
-                    task_id,
-                    "dashboard",
-                    "interactive_ui",
-                    "INFO",
-                    "task_submitted",
-                    "Task submitted from dashboard",
-                    None,
-                    f"dashboard-{task_id}",
-                ),
-            )
-            commit = getattr(connection, "commit", None)
-            if callable(commit):
-                commit()
+                    cursor.execute(
+                        (
+                            "UPDATE tasks SET root_task_id = %s, workspace_path = %s, target_repo = %s, target_ref = %s, working_branch = %s, payload_json = %s "
+                            "WHERE id = %s"
+                        ),
+                        (
+                            task_id,
+                            repository_context["workspace_path"],
+                            repository_context["target_repo"],
+                            repository_context["target_ref"],
+                            repository_context["working_branch"],
+                            json.dumps(payload_json, ensure_ascii=False),
+                            task_id,
+                        ),
+                    )
+                    phase_payload = dict(payload_json)
+                    phase_payload["orchestration"] = {
+                        **payload_json["orchestration"],
+                        "source_task_id": task_id,
+                    }
+                    cursor.execute(
+                        (
+                            "INSERT INTO tasks ("
+                            "parent_task_id, root_task_id, task_type, phase, status, requested_by_role, assigned_role, assigned_service, "
+                            "priority, workspace_path, target_repo, target_ref, working_branch, payload_json, retry_count, max_retry, approval_required"
+                            ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                        ),
+                        (
+                            task_id,
+                            task_id,
+                            "phase0_brainstorm",
+                            0,
+                            task_status,
+                            "dashboard",
+                            assigned_role,
+                            assigned_service,
+                            priority,
+                            repository_context["workspace_path"],
+                            repository_context["target_repo"],
+                            repository_context["target_ref"],
+                            repository_context["working_branch"],
+                            json.dumps(phase_payload, ensure_ascii=False),
+                            0,
+                            3,
+                            False,
+                        ),
+                    )
+                    phase_task_id = self._last_insert_id(cursor, connection)
+                    cursor.execute(
+                        (
+                            "INSERT INTO logs (task_id, root_task_id, service, component, level, event_type, message, details_json, trace_id) "
+                            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                        ),
+                        (
+                            task_id,
+                            task_id,
+                            "dashboard",
+                            "interactive_ui",
+                            "INFO",
+                            "phase_root_created",
+                            "Phase orchestration root task created",
+                            None,
+                            f"dashboard-{task_id}",
+                        ),
+                    )
+                    cursor.execute(
+                        (
+                            "INSERT INTO logs (task_id, root_task_id, service, component, level, event_type, message, details_json, trace_id) "
+                            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                        ),
+                        (
+                            phase_task_id,
+                            task_id,
+                            "dashboard",
+                            "interactive_ui",
+                            "INFO",
+                            "phase_task_enqueued",
+                            "Initial phase 0 task created",
+                            None,
+                            f"dashboard-{task_id}",
+                        ),
+                    )
+                else:
+                    cursor.execute(
+                        (
+                            "INSERT INTO tasks ("
+                            "parent_task_id, root_task_id, task_type, phase, status, requested_by_role, assigned_role, assigned_service, "
+                            "priority, workspace_path, target_repo, target_ref, working_branch, payload_json, retry_count, max_retry, approval_required"
+                            ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                        ),
+                        (
+                            None,
+                            0,
+                            task_type,
+                            phase,
+                            task_status,
+                            "dashboard",
+                            assigned_role,
+                            assigned_service,
+                            priority,
+                            repository_context["workspace_path"] if repository_context else None,
+                            repository_context["target_repo"] if repository_context else None,
+                            repository_context["target_ref"] if repository_context else None,
+                            repository_context["working_branch"] if repository_context else None,
+                            json.dumps(payload_json, ensure_ascii=False),
+                            0,
+                            3,
+                            False,
+                        ),
+                    )
+                    task_id = self._last_insert_id(cursor, connection)
+                    repository_context = self._finalize_repository_context(task_id, repository_context)
+                    if repository_context is not None:
+                        payload_json["repository_path"] = repository_context["repository_path"]
+                        if repository_context["requires_clone"]:
+                            payload_json["clone_destination"] = f"{repository_context['workspace_path']}/repo"
+                    cursor.execute(
+                        (
+                            "UPDATE tasks SET root_task_id = %s, workspace_path = %s, target_repo = %s, target_ref = %s, working_branch = %s, payload_json = %s "
+                            "WHERE id = %s"
+                        ),
+                        (
+                            task_id,
+                            repository_context["workspace_path"] if repository_context else None,
+                            repository_context["target_repo"] if repository_context else None,
+                            repository_context["target_ref"] if repository_context else None,
+                            repository_context["working_branch"] if repository_context else None,
+                            json.dumps(payload_json, ensure_ascii=False),
+                            task_id,
+                        ),
+                    )
+                cursor.execute(
+                    (
+                        "INSERT INTO logs (task_id, root_task_id, service, component, level, event_type, message, details_json, trace_id) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                    ),
+                    (
+                        task_id,
+                        task_id,
+                        "dashboard",
+                        "interactive_ui",
+                        "INFO",
+                        "task_submitted",
+                        "Task submitted from dashboard",
+                        None,
+                        f"dashboard-{task_id}",
+                    ),
+                )
+                commit = getattr(connection, "commit", None)
+                if callable(commit):
+                    commit()
+            except Exception:
+                rollback = getattr(connection, "rollback", None)
+                if callable(rollback):
+                    rollback()
+                return self._json_response(500, {"error": "internal_server_error"})
 
         task = self._load_task(task_id)
         return self._json_response(201, {"task": task, "scan": payload_json["security_scan"]})
@@ -278,8 +410,8 @@ class SecureDashboard:
             cursor = self._cursor(connection)
             cursor.execute(
                 (
-                    "SELECT id, root_task_id, task_type, status, assigned_service, priority, workspace_path, target_repo, target_ref, working_branch, result_summary_md, created_at "
-                    "FROM tasks ORDER BY created_at DESC, id DESC LIMIT 50"
+                    "SELECT id, parent_task_id, root_task_id, task_type, phase, status, assigned_service, priority, payload_json, workspace_path, target_repo, target_ref, working_branch, result_summary_md, created_at "
+                    "FROM tasks WHERE parent_task_id IS NULL ORDER BY created_at DESC, id DESC LIMIT 50"
                 ),
                 (),
             )
@@ -300,9 +432,20 @@ class SecureDashboard:
                 (task_id,),
             )
             logs = self._fetchall(cursor)
+            subtasks: list[dict[str, Any]] = []
+            if task.get("parent_task_id") is None and task.get("root_task_id") == task_id:
+                cursor.execute(
+                    (
+                        "SELECT id, parent_task_id, root_task_id, task_type, phase, status, assigned_service, priority, payload_json, workspace_path, target_repo, target_ref, working_branch, result_summary_md, created_at "
+                        "FROM tasks WHERE root_task_id = %s AND id != %s ORDER BY phase ASC, id ASC"
+                    ),
+                    (task_id, task_id),
+                )
+                subtasks = [self._serialize_task_row(row) for row in self._fetchall(cursor)]
 
         payload = {
             "task": task,
+            "subtasks": subtasks,
             "logs": logs,
             "result_html": self.render_markdown(task.get("result_summary_md") or ""),
         }
@@ -313,7 +456,7 @@ class SecureDashboard:
             cursor = self._cursor(connection)
             cursor.execute(
                 (
-                    "SELECT id, root_task_id, task_type, phase, status, requested_by_role, assigned_role, assigned_service, "
+                    "SELECT id, parent_task_id, root_task_id, task_type, phase, status, requested_by_role, assigned_role, assigned_service, "
                     "priority, workspace_path, target_repo, target_ref, working_branch, payload_json, result_summary_md, lease_owner, lease_expires_at, started_at, finished_at, created_at "
                     "FROM tasks WHERE id = %s"
                 ),
@@ -568,6 +711,23 @@ class SecureDashboard:
         result["payload_json"] = payload_json
         result["repository_path"] = (payload_json or {}).get("repository_path") or row.get("workspace_path")
         result["workspace_path"] = row.get("workspace_path")
+        parent_task_id = row.get("parent_task_id")
+        root_task_id = row.get("root_task_id")
+        is_root = parent_task_id is None and row.get("id") == root_task_id
+        result["is_root"] = is_root
+        result["relationship_label"] = "root" if is_root else "child"
+        orchestration = payload_json.get("orchestration") if isinstance(payload_json, dict) else None
+        if isinstance(orchestration, dict):
+            result["current_phase"] = orchestration.get("current_phase")
+            result["last_completed_phase"] = orchestration.get("last_completed_phase")
+            result["llm_model"] = orchestration.get("llm_model") or "N/A"
+            result["handoff_message"] = orchestration.get("handoff_message") or "引き継ぎ事項なし"
+            result["phase_summary"] = orchestration.get("phase_summary") or "-"
+        else:
+            result["llm_model"] = "N/A"
+            result["handoff_message"] = "引き継ぎ事項なし"
+            result["phase_summary"] = "-"
+        result["instruction"] = (payload_json or {}).get("instruction") if isinstance(payload_json, dict) else None
         return result
 
     def _resolve_repository_context(self, repository_path: Any, target_ref: Any) -> dict[str, Any] | None:

@@ -1,10 +1,31 @@
+import base64
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 
 from backend import MariaDBTaskBackend
+from backend.phase_orchestrator import DEFAULT_REWORK_LIMIT, PhaseOrchestrator
 from backend.llm_client import LLMConfigurationError, LLMRateLimitError, LLMTimeoutError
 from backend.repository_workspace import CommitPushError
 from backend.service_runner import WorkerEngine
+
+
+def test_build_prompt_includes_phase_specific_context_for_orchestrated_tasks(db_connection_mock):
+    backend = MariaDBTaskBackend(db_connection_mock)
+    phase1_task = SimpleNamespace(
+        phase=1,
+        task_type="phase1_design",
+        payload_json={"task": "README を改善"},
+        target_repo="example/project",
+        working_branch="mn2/10/phase0",
+    )
+
+    prompt = backend._build_prompt(phase1_task, "README を改善する")
+
+    assert "Phase: 1" in prompt
+    assert "Task Type: phase1_design" in prompt
+    assert "基本設計" in prompt
+    assert "README を改善する" in prompt
 
 
 def test_worker_cycle_leases_and_starts_queued_task(db_connection_mock):
@@ -69,16 +90,30 @@ def test_worker_resolves_task_working_directory(db_connection_mock):
 
 def test_worker_clones_github_repository_and_creates_branch(db_connection_mock, tmp_path):
     commands: list[tuple[list[str], Path]] = []
+    token = "token-123"
+    expected_header = base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
 
-    def fake_git_runner(args: list[str], cwd: Path) -> None:
+    def fake_git_runner(args: list[str], cwd: Path):
         commands.append((args, cwd))
         if args[:2] == ["git", "clone"]:
             Path(args[-1]).mkdir(parents=True, exist_ok=True)
+            return None
+        if args == ["git", "remote", "get-url", "origin"]:
+            from subprocess import CompletedProcess
+
+            return CompletedProcess(args, 0, stdout="https://github.com/example/project.git\n", stderr="")
+        if args[:3] == ["git", "rev-parse", "--verify"] and args[-1].startswith("origin/"):
+            raise RuntimeError("remote branch missing")
+        return None
 
     db_connection_mock.tasks[1]["workspace_path"] = str(tmp_path / "1")
     db_connection_mock.tasks[1]["target_repo"] = "example/project"
     db_connection_mock.tasks[1]["target_ref"] = "develop"
     db_connection_mock.tasks[1]["working_branch"] = "mn2/1/phase0"
+    import os
+
+    previous_token = os.environ.get("GITHUB_TOKEN")
+    os.environ["GITHUB_TOKEN"] = token
 
     engine = WorkerEngine(
         db_connection_mock,
@@ -88,7 +123,13 @@ def test_worker_clones_github_repository_and_creates_branch(db_connection_mock, 
         workspace_root=tmp_path,
     )
 
-    processed = engine.run_once()
+    try:
+        processed = engine.run_once()
+    finally:
+        if previous_token is None:
+            os.environ.pop("GITHUB_TOKEN", None)
+        else:
+            os.environ["GITHUB_TOKEN"] = previous_token
 
     workspace_root = tmp_path / "1"
     assert processed is True
@@ -96,9 +137,12 @@ def test_worker_clones_github_repository_and_creates_branch(db_connection_mock, 
     assert (workspace_root / "system_docs_snapshot").is_dir()
     assert (workspace_root / "patches").is_dir()
     assert commands == [
-        (["git", "clone", "https://github.com/example/project.git", str(workspace_root / "repo")], workspace_root),
+        (["git", "-c", f"http.https://github.com/.extraheader=AUTHORIZATION: basic {expected_header}", "clone", "https://github.com/example/project.git", str(workspace_root / "repo")], workspace_root),
+        (["git", "remote", "get-url", "origin"], workspace_root / "repo"),
+        (["git", "-c", f"http.https://github.com/.extraheader=AUTHORIZATION: basic {expected_header}", "fetch", "origin", "--prune"], workspace_root / "repo"),
+        (["git", "rev-parse", "--verify", "origin/mn2/1/phase0"], workspace_root / "repo"),
         (["git", "checkout", "develop"], workspace_root / "repo"),
-        (["git", "checkout", "-B", "mn2/1/phase0"], workspace_root / "repo"),
+        (["git", "checkout", "-B", "mn2/1/phase0", "develop"], workspace_root / "repo"),
     ]
 
 
@@ -259,6 +303,778 @@ def test_worker_generates_llm_response_commits_changes_and_marks_waiting_approva
     assert any(log["event_type"] == "llm_generation_succeeded" for log in db_connection_mock.logs)
     assert any(log["event_type"] == "git_commit_succeeded" for log in db_connection_mock.logs)
     assert any(log["event_type"] == "git_push_succeeded" for log in db_connection_mock.logs)
+
+
+def test_worker_advances_orchestrated_phase_task_after_direct_edit_success(db_connection_mock, tmp_path):
+    db_connection_mock.tasks = {
+        10: {
+            "id": 10,
+            "parent_task_id": None,
+            "root_task_id": 10,
+            "task_type": "phase_orchestration_root",
+            "phase": 0,
+            "status": "running",
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "assigned_service": "brain",
+            "priority": 0,
+            "workspace_path": str(tmp_path / "10"),
+            "target_repo": "example/project",
+            "target_ref": "main",
+            "working_branch": "mn2/10/phase0",
+            "payload_json": {
+                "phase_flow": [0, 1, 2, 3, 4, 5],
+                "orchestration": {"phase_flow": [0, 1, 2, 3, 4, 5], "current_phase": 0, "phase_attempt": 0},
+            },
+            "approval_required": True,
+            "result_summary_md": None,
+            "started_at": None,
+        },
+        11: {
+            "id": 11,
+            "parent_task_id": 10,
+            "root_task_id": 10,
+            "task_type": "phase0_brainstorm",
+            "phase": 0,
+            "status": "queued",
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "assigned_service": "brain",
+            "priority": 0,
+            "workspace_path": str(tmp_path / "10"),
+            "target_repo": "example/project",
+            "target_ref": "main",
+            "working_branch": "mn2/10/phase0",
+            "payload_json": {
+                "task": "README を更新",
+                "instruction": "README を更新する",
+                "phase_flow": [0, 1, 2, 3, 4, 5],
+                "orchestration": {"phase_flow": [0, 1, 2, 3, 4, 5], "current_phase": 0, "phase_attempt": 0},
+            },
+            "approval_required": False,
+            "result_summary_md": None,
+            "started_at": None,
+        },
+    }
+    db_connection_mock._next_task_id = 12
+
+    class FakeLLMClient:
+        model = "gpt-5.4-mini"
+
+        def generate(self, prompt: str, metadata: dict | None = None) -> str:
+            return "READMEを更新しました\n\n- phase 0 complete"
+
+    class FakeRepositoryWorkspace:
+        def prepare_repository(self, **kwargs):
+            repo_path = tmp_path / "10" / "repo"
+            repo_path.mkdir(parents=True, exist_ok=True)
+            return {
+                "workspace_path": str(tmp_path / "10"),
+                "repo_path": str(repo_path),
+                "artifacts_path": str(tmp_path / "10" / "artifacts"),
+                "docs_snapshot_path": str(tmp_path / "10" / "system_docs_snapshot"),
+                "patches_path": str(tmp_path / "10" / "patches"),
+            }
+
+        def commit_and_push(self, **kwargs):
+            return {
+                "changed_files": ["README.md"],
+                "commit_sha": "abc1234",
+                "commit_message": "phase 0",
+                "working_branch": kwargs["working_branch"],
+            }
+
+    engine = WorkerEngine(
+        db_connection_mock,
+        service_name="brain",
+        worker_name="worker-brain-1",
+        llm_client=FakeLLMClient(),
+        workspace_root=tmp_path,
+    )
+    engine.task_backend.repository_workspace = FakeRepositoryWorkspace()
+
+    processed = engine.run_once()
+
+    next_task = db_connection_mock.tasks[12]
+    assert processed is True
+    assert db_connection_mock.tasks[11]["status"] == "succeeded"
+    assert db_connection_mock.tasks[10]["status"] == "running"
+    assert db_connection_mock.tasks[10]["payload_json"]["orchestration"]["current_phase"] == 1
+    assert next_task["task_type"] == "phase1_design"
+    assert next_task["phase"] == 1
+    assert next_task["status"] == "queued"
+    assert next_task["parent_task_id"] == 11
+    assert next_task["root_task_id"] == 10
+    assert next_task["workspace_path"] == str(tmp_path / "10")
+    assert next_task["target_repo"] == "example/project"
+    assert next_task["target_ref"] == "main"
+    assert next_task["working_branch"] == "mn2/10/phase0"
+    assert db_connection_mock.tasks[11]["payload_json"]["orchestration"]["llm_model"] == "gpt-5.4-mini"
+    assert db_connection_mock.tasks[11]["payload_json"]["orchestration"]["phase_summary"] == "READMEを更新しました"
+    assert db_connection_mock.tasks[11]["payload_json"]["orchestration"]["handoff_message"] == "READMEを更新しました"
+    assert next_task["payload_json"]["orchestration"]["llm_model"] == "gpt-5.4-mini"
+    assert next_task["payload_json"]["orchestration"]["phase_summary"] == "READMEを更新しました"
+    assert next_task["payload_json"]["orchestration"]["handoff_message"] == "READMEを更新しました"
+    assert any(log["event_type"] == "phase_task_enqueued" for log in db_connection_mock.logs)
+
+
+def test_worker_advances_orchestrated_phase_task_on_no_change(db_connection_mock, tmp_path):
+    db_connection_mock.tasks = {
+        20: {
+            "id": 20,
+            "parent_task_id": None,
+            "root_task_id": 20,
+            "task_type": "phase_orchestration_root",
+            "phase": 0,
+            "status": "running",
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "assigned_service": "brain",
+            "priority": 0,
+            "workspace_path": str(tmp_path / "20"),
+            "target_repo": "example/project",
+            "target_ref": "main",
+            "working_branch": "mn2/20/phase0",
+            "payload_json": {"phase_flow": [0, 1, 2, 3, 4, 5], "orchestration": {"phase_flow": [0, 1, 2, 3, 4, 5], "current_phase": 0}},
+            "approval_required": True,
+            "result_summary_md": None,
+            "started_at": None,
+        },
+        21: {
+            "id": 21,
+            "parent_task_id": 20,
+            "root_task_id": 20,
+            "task_type": "phase0_brainstorm",
+            "phase": 0,
+            "status": "queued",
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "assigned_service": "brain",
+            "priority": 0,
+            "workspace_path": str(tmp_path / "20"),
+            "target_repo": "example/project",
+            "target_ref": "main",
+            "working_branch": "mn2/20/phase0",
+            "payload_json": {"task": "README を更新", "instruction": "README を更新する", "phase_flow": [0, 1, 2, 3, 4, 5], "orchestration": {"phase_flow": [0, 1, 2, 3, 4, 5], "current_phase": 0}},
+            "approval_required": False,
+            "result_summary_md": None,
+            "started_at": None,
+        },
+    }
+    db_connection_mock._next_task_id = 22
+
+    class FakeLLMClient:
+        model = "gpt-5.4-mini"
+
+        def generate(self, prompt: str, metadata: dict | None = None) -> str:
+            return "READMEを確認しました"
+
+    class FakeRepositoryWorkspace:
+        def prepare_repository(self, **kwargs):
+            repo_path = tmp_path / "20" / "repo"
+            repo_path.mkdir(parents=True, exist_ok=True)
+            return {
+                "workspace_path": str(tmp_path / "20"),
+                "repo_path": str(repo_path),
+                "artifacts_path": str(tmp_path / "20" / "artifacts"),
+                "docs_snapshot_path": str(tmp_path / "20" / "system_docs_snapshot"),
+                "patches_path": str(tmp_path / "20" / "patches"),
+            }
+
+        def commit_and_push(self, **kwargs):
+            raise CommitPushError("phase_edit_no_changes")
+
+    engine = WorkerEngine(
+        db_connection_mock,
+        service_name="brain",
+        worker_name="worker-brain-1",
+        llm_client=FakeLLMClient(),
+        workspace_root=tmp_path,
+    )
+    engine.task_backend.repository_workspace = FakeRepositoryWorkspace()
+
+    processed = engine.run_once()
+
+    assert processed is True
+    assert db_connection_mock.tasks[21]["status"] == "succeeded"
+    assert db_connection_mock.tasks[20]["status"] == "running"
+    assert db_connection_mock.tasks[22]["task_type"] == "phase1_design"
+    assert db_connection_mock.tasks[21]["payload_json"]["orchestration"]["llm_model"] == "gpt-5.4-mini"
+    assert db_connection_mock.tasks[21]["payload_json"]["orchestration"]["phase_summary"] == "READMEを確認しました"
+    assert db_connection_mock.tasks[21]["payload_json"]["orchestration"]["handoff_message"] == "READMEを確認しました"
+    assert db_connection_mock.tasks[22]["payload_json"]["orchestration"]["llm_model"] == "gpt-5.4-mini"
+    assert any(log["event_type"] == "phase_edit_no_changes" for log in db_connection_mock.logs)
+
+
+def test_worker_phase5_audit_parses_rejected_review_and_requeues_phase4(db_connection_mock, tmp_path):
+    db_connection_mock.tasks = {
+        70: {
+            "id": 70,
+            "parent_task_id": None,
+            "root_task_id": 70,
+            "task_type": "phase_orchestration_root",
+            "phase": 0,
+            "status": "running",
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "assigned_service": "brain",
+            "priority": 0,
+            "workspace_path": str(tmp_path / "70"),
+            "target_repo": "example/project",
+            "target_ref": "main",
+            "working_branch": "mn2/70/phase0",
+            "payload_json": {"phase_flow": [0, 1, 2, 3, 4, 5], "orchestration": {"phase_flow": [0, 1, 2, 3, 4, 5], "current_phase": 5, "phase_attempt": 0}},
+            "approval_required": True,
+            "result_summary_md": None,
+            "started_at": None,
+        },
+        71: {
+            "id": 71,
+            "parent_task_id": 70,
+            "root_task_id": 70,
+            "task_type": "phase5_audit",
+            "phase": 5,
+            "status": "queued",
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "assigned_service": "brain",
+            "priority": 0,
+            "workspace_path": str(tmp_path / "70"),
+            "target_repo": "example/project",
+            "target_ref": "main",
+            "working_branch": "mn2/70/phase0",
+            "payload_json": {
+                "task": "監査",
+                "instruction": "レビュー結果を返す",
+                "phase_flow": [0, 1, 2, 3, 4, 5],
+                "orchestration": {"phase_flow": [0, 1, 2, 3, 4, 5], "current_phase": 5, "phase_attempt": 0},
+            },
+            "approval_required": False,
+            "result_summary_md": None,
+            "started_at": None,
+        },
+    }
+    db_connection_mock._next_task_id = 72
+
+    class FakeLLMClient:
+        def generate(self, prompt: str, metadata: dict | None = None) -> str:
+            return "REVIEW RESULT: REJECTED\nfix failing assertions"
+
+    class FakeRepositoryWorkspace:
+        def prepare_repository(self, **kwargs):
+            repo_path = tmp_path / "70" / "repo"
+            repo_path.mkdir(parents=True, exist_ok=True)
+            return {
+                "workspace_path": str(tmp_path / "70"),
+                "repo_path": str(repo_path),
+                "artifacts_path": str(tmp_path / "70" / "artifacts"),
+                "docs_snapshot_path": str(tmp_path / "70" / "system_docs_snapshot"),
+                "patches_path": str(tmp_path / "70" / "patches"),
+            }
+
+    engine = WorkerEngine(
+        db_connection_mock,
+        service_name="brain",
+        worker_name="worker-brain-1",
+        llm_client=FakeLLMClient(),
+        workspace_root=tmp_path,
+    )
+    engine.task_backend.repository_workspace = FakeRepositoryWorkspace()
+
+    processed = engine.run_once()
+
+    assert processed is True
+    assert db_connection_mock.tasks[71]["status"] == "succeeded"
+    assert db_connection_mock.tasks[70]["status"] == "running"
+    assert db_connection_mock.tasks[70]["payload_json"]["orchestration"]["current_phase"] == 4
+    assert db_connection_mock.tasks[72]["task_type"] == "phase4_impl"
+    assert db_connection_mock.tasks[72]["phase"] == 4
+    assert db_connection_mock.tasks[72]["status"] == "queued"
+    assert any(log["event_type"] == "phase_rework_enqueued" for log in db_connection_mock.logs)
+
+
+def test_worker_phase5_audit_treats_not_approved_and_requeues_phase4(db_connection_mock, tmp_path):
+    db_connection_mock.tasks = {
+        73: {
+            "id": 73,
+            "parent_task_id": None,
+            "root_task_id": 73,
+            "task_type": "phase_orchestration_root",
+            "phase": 0,
+            "status": "running",
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "assigned_service": "brain",
+            "priority": 0,
+            "workspace_path": str(tmp_path / "73"),
+            "target_repo": "example/project",
+            "target_ref": "main",
+            "working_branch": "mn2/73/phase0",
+            "payload_json": {"phase_flow": [0, 1, 2, 3, 4, 5], "orchestration": {"phase_flow": [0, 1, 2, 3, 4, 5], "current_phase": 5, "phase_attempt": 0}},
+            "approval_required": True,
+            "result_summary_md": None,
+            "started_at": None,
+        },
+        74: {
+            "id": 74,
+            "parent_task_id": 73,
+            "root_task_id": 73,
+            "task_type": "phase5_audit",
+            "phase": 5,
+            "status": "queued",
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "assigned_service": "brain",
+            "priority": 0,
+            "workspace_path": str(tmp_path / "73"),
+            "target_repo": "example/project",
+            "target_ref": "main",
+            "working_branch": "mn2/73/phase0",
+            "payload_json": {
+                "task": "監査",
+                "instruction": "レビュー結果を返す",
+                "phase_flow": [0, 1, 2, 3, 4, 5],
+                "orchestration": {"phase_flow": [0, 1, 2, 3, 4, 5], "current_phase": 5, "phase_attempt": 0},
+            },
+            "approval_required": False,
+            "result_summary_md": None,
+            "started_at": None,
+        },
+    }
+    db_connection_mock._next_task_id = 75
+
+    class FakeLLMClient:
+        def generate(self, prompt: str, metadata: dict | None = None) -> str:
+            return "NOT APPROVED. REJECTED\nneeds corrections"
+
+    class FakeRepositoryWorkspace:
+        def prepare_repository(self, **kwargs):
+            repo_path = tmp_path / "73" / "repo"
+            repo_path.mkdir(parents=True, exist_ok=True)
+            return {
+                "workspace_path": str(tmp_path / "73"),
+                "repo_path": str(repo_path),
+                "artifacts_path": str(tmp_path / "73" / "artifacts"),
+                "docs_snapshot_path": str(tmp_path / "73" / "system_docs_snapshot"),
+                "patches_path": str(tmp_path / "73" / "patches"),
+            }
+
+    engine = WorkerEngine(
+        db_connection_mock,
+        service_name="brain",
+        worker_name="worker-brain-1",
+        llm_client=FakeLLMClient(),
+        workspace_root=tmp_path,
+    )
+    engine.task_backend.repository_workspace = FakeRepositoryWorkspace()
+
+    processed = engine.run_once()
+
+    assert processed is True
+    assert db_connection_mock.tasks[74]["status"] == "succeeded"
+    assert db_connection_mock.tasks[73]["status"] == "running"
+    assert db_connection_mock.tasks[73]["payload_json"]["orchestration"]["current_phase"] == 4
+    assert db_connection_mock.tasks[75]["task_type"] == "phase4_impl"
+    assert db_connection_mock.tasks[75]["status"] == "queued"
+    assert any(log["event_type"] == "phase_rework_enqueued" for log in db_connection_mock.logs)
+
+
+def test_worker_phase5_audit_parses_approved_and_promotes_root_to_waiting_approval(db_connection_mock, tmp_path):
+    db_connection_mock.tasks = {
+        76: {
+            "id": 76,
+            "parent_task_id": None,
+            "root_task_id": 76,
+            "task_type": "phase_orchestration_root",
+            "phase": 0,
+            "status": "running",
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "assigned_service": "brain",
+            "priority": 0,
+            "workspace_path": str(tmp_path / "76"),
+            "target_repo": "example/project",
+            "target_ref": "main",
+            "working_branch": "mn2/76/phase0",
+            "payload_json": {"phase_flow": [0, 1, 2, 3, 4, 5], "orchestration": {"phase_flow": [0, 1, 2, 3, 4, 5], "current_phase": 5, "phase_attempt": 0}},
+            "approval_required": True,
+            "result_summary_md": None,
+            "started_at": None,
+        },
+        77: {
+            "id": 77,
+            "parent_task_id": 76,
+            "root_task_id": 76,
+            "task_type": "phase5_audit",
+            "phase": 5,
+            "status": "queued",
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "assigned_service": "brain",
+            "priority": 0,
+            "workspace_path": str(tmp_path / "76"),
+            "target_repo": "example/project",
+            "target_ref": "main",
+            "working_branch": "mn2/76/phase0",
+            "payload_json": {
+                "task": "監査",
+                "instruction": "レビュー結果を返す",
+                "phase_flow": [0, 1, 2, 3, 4, 5],
+                "orchestration": {"phase_flow": [0, 1, 2, 3, 4, 5], "current_phase": 5, "phase_attempt": 0},
+            },
+            "approval_required": False,
+            "result_summary_md": None,
+            "started_at": None,
+        },
+    }
+    db_connection_mock._next_task_id = 78
+
+    class FakeLLMClient:
+        def generate(self, prompt: str, metadata: dict | None = None) -> str:
+            return "NOT REJECTED. APPROVED\nlooks good"
+
+    class FakeRepositoryWorkspace:
+        def prepare_repository(self, **kwargs):
+            repo_path = tmp_path / "76" / "repo"
+            repo_path.mkdir(parents=True, exist_ok=True)
+            return {
+                "workspace_path": str(tmp_path / "76"),
+                "repo_path": str(repo_path),
+                "artifacts_path": str(tmp_path / "76" / "artifacts"),
+                "docs_snapshot_path": str(tmp_path / "76" / "system_docs_snapshot"),
+                "patches_path": str(tmp_path / "76" / "patches"),
+            }
+
+    engine = WorkerEngine(
+        db_connection_mock,
+        service_name="brain",
+        worker_name="worker-brain-1",
+        llm_client=FakeLLMClient(),
+        workspace_root=tmp_path,
+    )
+    engine.task_backend.repository_workspace = FakeRepositoryWorkspace()
+
+    processed = engine.run_once()
+
+    assert processed is True
+    assert db_connection_mock.tasks[77]["status"] == "succeeded"
+    assert db_connection_mock.tasks[76]["status"] == "waiting_approval"
+    assert db_connection_mock.tasks[76]["payload_json"]["orchestration"]["final_review_state"] == "approved"
+    assert 78 not in db_connection_mock.tasks
+    assert any(log["event_type"] == "root_task_promoted_waiting_approval" for log in db_connection_mock.logs)
+
+
+def test_review_state_parsers_treat_not_approved_as_rejected(db_connection_mock):
+    backend = MariaDBTaskBackend(db_connection_mock)
+
+    assert backend._parse_review_state("NOT APPROVED") == "rejected"
+    assert PhaseOrchestrator._normalize_review_state(None, "NOT APPROVED") == "rejected"
+    assert PhaseOrchestrator._normalize_review_state(None, "NOT APPROVED. REJECTED") == "rejected"
+    assert backend._parse_review_state("NOT REJECTED. APPROVED") == "approved"
+    assert PhaseOrchestrator._normalize_review_state(None, "NOT REJECTED. APPROVED") == "approved"
+
+
+def test_phase_orchestrator_deduplicates_when_next_phase_task_is_already_active(db_connection_mock):
+    db_connection_mock.tasks = {
+        80: {
+            "id": 80,
+            "parent_task_id": None,
+            "root_task_id": 80,
+            "task_type": "phase_orchestration_root",
+            "phase": 0,
+            "status": "running",
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "assigned_service": "brain",
+            "priority": 0,
+            "workspace_path": "/workspace/80",
+            "target_repo": "example/project",
+            "target_ref": "main",
+            "working_branch": "mn2/80/phase0",
+            "payload_json": {"phase_flow": [0, 1, 2, 3, 4, 5], "orchestration": {"phase_flow": [0, 1, 2, 3, 4, 5], "current_phase": 0}},
+            "approval_required": True,
+            "result_summary_md": None,
+            "started_at": None,
+        },
+        81: {
+            "id": 81,
+            "parent_task_id": 80,
+            "root_task_id": 80,
+            "task_type": "phase0_brainstorm",
+            "phase": 0,
+            "status": "succeeded",
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "assigned_service": "brain",
+            "priority": 0,
+            "workspace_path": "/workspace/80",
+            "target_repo": "example/project",
+            "target_ref": "main",
+            "working_branch": "mn2/80/phase0",
+            "payload_json": {"phase_flow": [0, 1, 2, 3, 4, 5], "orchestration": {"phase_flow": [0, 1, 2, 3, 4, 5], "current_phase": 0}},
+            "approval_required": False,
+            "result_summary_md": None,
+            "started_at": None,
+        },
+        82: {
+            "id": 82,
+            "parent_task_id": 81,
+            "root_task_id": 80,
+            "task_type": "phase1_design",
+            "phase": 1,
+            "status": "queued",
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "assigned_service": "brain",
+            "priority": 0,
+            "workspace_path": "/workspace/80",
+            "target_repo": "example/project",
+            "target_ref": "main",
+            "working_branch": "mn2/80/phase0",
+            "payload_json": {"phase_flow": [0, 1, 2, 3, 4, 5], "orchestration": {"phase_flow": [0, 1, 2, 3, 4, 5], "current_phase": 1}},
+            "approval_required": False,
+            "result_summary_md": None,
+            "started_at": None,
+        },
+    }
+    db_connection_mock._next_task_id = 83
+    orchestrator = PhaseOrchestrator(MariaDBTaskBackend(db_connection_mock).db)
+
+    handled = orchestrator.handle_phase_completion(
+        orchestrator.db.select_orchestration_task_for_update(81),
+        service_name="brain",
+        worker_name="worker-brain-1",
+        result_summary="phase0 done",
+    )
+
+    assert handled is True
+    assert 83 not in db_connection_mock.tasks
+    assert db_connection_mock.tasks[80]["payload_json"]["orchestration"]["current_phase"] == 0
+    assert any(log["event_type"] == "phase_task_deduplicated" for log in db_connection_mock.logs)
+
+
+def test_phase_orchestrator_blocks_root_when_rework_limit_exceeded(db_connection_mock):
+    db_connection_mock.tasks = {
+        90: {
+            "id": 90,
+            "parent_task_id": None,
+            "root_task_id": 90,
+            "task_type": "phase_orchestration_root",
+            "phase": 0,
+            "status": "running",
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "assigned_service": "brain",
+            "priority": 0,
+            "workspace_path": "/workspace/90",
+            "target_repo": "example/project",
+            "target_ref": "main",
+            "working_branch": "mn2/90/phase0",
+            "payload_json": {
+                "phase_flow": [0, 1, 2, 3, 4, 5],
+                "orchestration": {"phase_flow": [0, 1, 2, 3, 4, 5], "current_phase": 5, "phase_attempt": DEFAULT_REWORK_LIMIT},
+            },
+            "approval_required": True,
+            "result_summary_md": None,
+            "started_at": None,
+        },
+        91: {
+            "id": 91,
+            "parent_task_id": 90,
+            "root_task_id": 90,
+            "task_type": "phase5_audit",
+            "phase": 5,
+            "status": "succeeded",
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "assigned_service": "brain",
+            "priority": 0,
+            "workspace_path": "/workspace/90",
+            "target_repo": "example/project",
+            "target_ref": "main",
+            "working_branch": "mn2/90/phase0",
+            "payload_json": {
+                "phase_flow": [0, 1, 2, 3, 4, 5],
+                "orchestration": {"phase_flow": [0, 1, 2, 3, 4, 5], "current_phase": 5, "phase_attempt": DEFAULT_REWORK_LIMIT},
+            },
+            "approval_required": False,
+            "result_summary_md": None,
+            "started_at": None,
+        },
+    }
+    db_connection_mock._next_task_id = 92
+    orchestrator = PhaseOrchestrator(MariaDBTaskBackend(db_connection_mock).db)
+
+    handled = orchestrator.handle_phase_completion(
+        orchestrator.db.select_orchestration_task_for_update(91),
+        service_name="brain",
+        worker_name="worker-brain-1",
+        review_state="rejected",
+        audit_feedback="still failing",
+    )
+
+    assert handled is True
+    assert db_connection_mock.tasks[90]["status"] == "blocked"
+    assert db_connection_mock.tasks[90]["payload_json"]["orchestration"]["failure_reason"] == "phase_rework_limit_exceeded"
+    assert 92 not in db_connection_mock.tasks
+    assert any(log["event_type"] == "root_task_blocked" for log in db_connection_mock.logs)
+
+
+def test_phase_orchestrator_requeues_phase4_when_phase5_rejected(db_connection_mock):
+    db_connection_mock.tasks = {
+        30: {
+            "id": 30,
+            "parent_task_id": None,
+            "root_task_id": 30,
+            "task_type": "phase_orchestration_root",
+            "phase": 0,
+            "status": "running",
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "assigned_service": "brain",
+            "priority": 0,
+            "workspace_path": "/workspace/30",
+            "target_repo": "example/project",
+            "target_ref": "main",
+            "working_branch": "mn2/30/phase0",
+            "payload_json": {"phase_flow": [0, 1, 2, 3, 4, 5], "orchestration": {"phase_flow": [0, 1, 2, 3, 4, 5], "current_phase": 5, "phase_attempt": 0}},
+            "approval_required": True,
+            "result_summary_md": None,
+            "started_at": None,
+        },
+        31: {
+            "id": 31,
+            "parent_task_id": 30,
+            "root_task_id": 30,
+            "task_type": "phase5_audit",
+            "phase": 5,
+            "status": "succeeded",
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "assigned_service": "brain",
+            "priority": 0,
+            "workspace_path": "/workspace/30",
+            "target_repo": "example/project",
+            "target_ref": "main",
+            "working_branch": "mn2/30/phase0",
+            "payload_json": {"phase_flow": [0, 1, 2, 3, 4, 5], "orchestration": {"phase_flow": [0, 1, 2, 3, 4, 5], "current_phase": 5, "phase_attempt": 0}},
+            "approval_required": False,
+            "result_summary_md": None,
+            "started_at": None,
+        },
+    }
+    db_connection_mock._next_task_id = 32
+    orchestrator = PhaseOrchestrator(MariaDBTaskBackend(db_connection_mock).db)
+
+    handled = orchestrator.handle_phase_completion(
+        orchestrator.db.select_orchestration_task_for_update(31),
+        service_name="brain",
+        worker_name="worker-brain-1",
+        review_state="rejected",
+        audit_feedback="fix failing assertions",
+    )
+
+    rework_task = db_connection_mock.tasks[32]
+    assert handled is True
+    assert db_connection_mock.tasks[30]["status"] == "running"
+    assert db_connection_mock.tasks[30]["payload_json"]["orchestration"]["current_phase"] == 4
+    assert db_connection_mock.tasks[30]["payload_json"]["orchestration"]["final_review_state"] == "rejected"
+    assert rework_task["task_type"] == "phase4_impl"
+    assert rework_task["phase"] == 4
+    assert rework_task["status"] == "queued"
+    assert rework_task["parent_task_id"] == 31
+    assert rework_task["payload_json"]["orchestration"]["audit_feedback"] == "fix failing assertions"
+    assert any(log["event_type"] == "phase_rework_enqueued" for log in db_connection_mock.logs)
+
+
+def test_phase_orchestrator_promotes_root_to_succeeded_and_blocks_on_failure(db_connection_mock):
+    db_connection_mock.tasks = {
+        40: {
+            "id": 40,
+            "parent_task_id": None,
+            "root_task_id": 40,
+            "task_type": "phase_orchestration_root",
+            "phase": 0,
+            "status": "running",
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "assigned_service": "brain",
+            "priority": 0,
+            "workspace_path": "/workspace/40",
+            "target_repo": None,
+            "target_ref": None,
+            "working_branch": None,
+            "payload_json": {"phase_flow": [0, 1, 2, 3, 4, 5], "orchestration": {"phase_flow": [0, 1, 2, 3, 4, 5], "current_phase": 5}},
+            "approval_required": False,
+            "result_summary_md": None,
+            "started_at": None,
+        },
+        41: {
+            "id": 41,
+            "parent_task_id": 40,
+            "root_task_id": 40,
+            "task_type": "phase5_audit",
+            "phase": 5,
+            "status": "succeeded",
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "assigned_service": "brain",
+            "priority": 0,
+            "workspace_path": "/workspace/40",
+            "target_repo": None,
+            "target_ref": None,
+            "working_branch": None,
+            "payload_json": {"phase_flow": [0, 1, 2, 3, 4, 5], "orchestration": {"phase_flow": [0, 1, 2, 3, 4, 5], "current_phase": 5}},
+            "approval_required": False,
+            "result_summary_md": None,
+            "started_at": None,
+        },
+        42: {
+            "id": 42,
+            "parent_task_id": 40,
+            "root_task_id": 40,
+            "task_type": "phase2_test_design",
+            "phase": 2,
+            "status": "blocked",
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "assigned_service": "brain",
+            "priority": 0,
+            "workspace_path": "/workspace/40",
+            "target_repo": None,
+            "target_ref": None,
+            "working_branch": None,
+            "payload_json": {"phase_flow": [0, 1, 2, 3, 4, 5], "orchestration": {"phase_flow": [0, 1, 2, 3, 4, 5], "current_phase": 2}},
+            "approval_required": False,
+            "result_summary_md": None,
+            "started_at": None,
+        },
+    }
+    orchestrator = PhaseOrchestrator(MariaDBTaskBackend(db_connection_mock).db)
+
+    approved = orchestrator.handle_phase_completion(
+        orchestrator.db.select_orchestration_task_for_update(41),
+        service_name="brain",
+        worker_name="worker-brain-1",
+        review_state="approved",
+    )
+
+    assert approved is True
+    assert db_connection_mock.tasks[40]["status"] == "succeeded"
+    assert db_connection_mock.tasks[40]["payload_json"]["orchestration"]["final_review_state"] == "approved"
+    assert any(log["event_type"] == "root_task_promoted_succeeded" for log in db_connection_mock.logs)
+
+    db_connection_mock.tasks[40]["status"] = "running"
+    blocked = orchestrator.handle_phase_blocked(
+        orchestrator.db.select_orchestration_task_for_update(42),
+        service_name="brain",
+        worker_name="worker-brain-1",
+        reason="repository_prepare_failed",
+    )
+
+    assert blocked is True
+    assert db_connection_mock.tasks[40]["status"] == "blocked"
+    assert any(log["event_type"] == "root_task_blocked" for log in db_connection_mock.logs)
 
 
 def test_worker_generates_llm_response_and_marks_local_task_succeeded_without_approval(db_connection_mock, tmp_path):

@@ -125,6 +125,111 @@ def test_repository_workspace_manager_uses_github_token_header_for_clone(tmp_pat
     assert clone_command[3:] == ["clone", "https://github.com/example/project.git", str(tmp_path / "1" / "repo")]
 
 
+def test_prepare_repository_restores_existing_remote_working_branch(tmp_path):
+    workspace, repo, origin = _init_workspace_repo(tmp_path)
+
+    # Seed a remote working branch that is ahead of main.
+    _git(["checkout", "mn2/1/phase0"], repo)
+    (repo / "README.md").write_text("hello\nremote-head\n", encoding="utf-8")
+    _git(["add", "README.md"], repo)
+    _git(["commit", "-m", "advance working branch"], repo)
+    _git(["push", "origin", "mn2/1/phase0"], repo)
+    remote_head = _git(["--git-dir", str(origin), "rev-parse", "mn2/1/phase0"], tmp_path).stdout.strip()
+
+    # Move local main forward separately so recreating from target_ref would diverge.
+    _git(["checkout", "main"], repo)
+    (repo / "README.md").write_text("hello\nmain-head\n", encoding="utf-8")
+    _git(["add", "README.md"], repo)
+    _git(["commit", "-m", "advance main"], repo)
+    _git(["push", "origin", "main"], repo)
+
+    manager = RepositoryWorkspaceManager()
+    manager.prepare_repository(
+        workspace_path=str(workspace),
+        target_repo="example/project",
+        target_ref="main",
+        working_branch="mn2/1/phase0",
+    )
+
+    prepared_head = _git(["rev-parse", "HEAD"], repo).stdout.strip()
+    assert prepared_head == remote_head
+
+
+def test_prepare_repository_uses_github_token_header_for_github_fetch(tmp_path, monkeypatch):
+    workspace = tmp_path / "1"
+    repo = workspace / "repo"
+    repo.mkdir(parents=True)
+    commands: list[tuple[list[str], Path]] = []
+    token = "token-123"
+    expected_header = base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
+
+    def fake_git_runner(args: list[str], cwd: Path):
+        commands.append((args, cwd))
+        if args == ["git", "remote", "get-url", "origin"]:
+            return subprocess.CompletedProcess(args, 0, stdout="https://github.com/example/project.git\n", stderr="")
+        if args[:3] == ["git", "rev-parse", "--verify"]:
+            raise subprocess.CalledProcessError(1, args, stderr="missing")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setenv("GITHUB_TOKEN", token)
+    manager = RepositoryWorkspaceManager(git_command_runner=fake_git_runner)
+
+    manager.prepare_repository(
+        workspace_path=str(workspace),
+        target_repo="example/project",
+        target_ref="main",
+        working_branch="mn2/1/phase0",
+    )
+
+    fetch_command = commands[1][0]
+    assert fetch_command[:3] == ["git", "-c", f"http.https://github.com/.extraheader=AUTHORIZATION: basic {expected_header}"]
+    assert fetch_command[3:] == ["fetch", "origin", "--prune"]
+
+
+def test_repository_workspace_manager_uses_github_token_header_for_working_branch_fetch(tmp_path, monkeypatch):
+    workspace = tmp_path / "1"
+    repo = workspace / "repo"
+    repo.mkdir(parents=True)
+    commands: list[tuple[list[str], Path]] = []
+    token = "token-123"
+    expected_header = base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
+
+    def fake_git_runner(args: list[str], cwd: Path):
+        commands.append((args, cwd))
+        if args == ["git", "fetch", "origin", "--prune"]:
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        if args == ["git", "remote", "get-url", "origin"]:
+            return subprocess.CompletedProcess(args, 0, stdout="https://github.com/example/project.git\n", stderr="")
+        if args == ["git", "rev-parse", "--verify", "mn2/1/phase0"]:
+            raise subprocess.CalledProcessError(1, args, stderr="missing local")
+        if args[:3] == ["git", "-c", f"http.https://github.com/.extraheader=AUTHORIZATION: basic {expected_header}"]:
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        if args == ["git", "rev-parse", "--verify", "origin/mn2/1/phase0"]:
+            return subprocess.CompletedProcess(args, 0, stdout="origin/mn2/1/phase0\n", stderr="")
+        if args == ["git", "diff", "--no-ext-diff", "origin/main...origin/mn2/1/phase0"]:
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        if args == ["git", "fetch", "origin", "main"]:
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        if args == ["git", "rev-parse", "--verify", "origin/main"]:
+            return subprocess.CompletedProcess(args, 0, stdout="origin/main\n", stderr="")
+        raise AssertionError(args)
+
+    monkeypatch.setenv("GITHUB_TOKEN", token)
+    manager = RepositoryWorkspaceManager(git_command_runner=fake_git_runner)
+
+    manager.get_diff(
+        workspace_path=str(workspace),
+        working_branch="mn2/1/phase0",
+        merge_target="main",
+    )
+
+    auth_fetch_commands = [args for args, _cwd in commands if args[:3] == ["git", "-c", f"http.https://github.com/.extraheader=AUTHORIZATION: basic {expected_header}"]]
+    assert [command[3:] for command in auth_fetch_commands] == [
+        ["fetch", "origin", "main"],
+        ["fetch", "origin", "mn2/1/phase0"],
+    ]
+
+
 def test_repository_workspace_manager_uses_github_token_header_for_github_push(tmp_path, monkeypatch):
     workspace = tmp_path / "1"
     repo = workspace / "repo"
@@ -163,9 +268,13 @@ def test_repository_workspace_manager_lists_allowlisted_merge_targets(monkeypatc
     workspace = tmp_path / "1"
     repo = workspace / "repo"
     repo.mkdir(parents=True)
+    token = "token-123"
+    expected_header = base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
 
     def fake_git_runner(args: list[str], cwd: Path):
-        if args == ["git", "fetch", "origin", "--prune"]:
+        if args == ["git", "remote", "get-url", "origin"]:
+            return subprocess.CompletedProcess(args, 0, stdout="https://github.com/example/project.git\n", stderr="")
+        if args[:3] == ["git", "-c", f"http.https://github.com/.extraheader=AUTHORIZATION: basic {expected_header}"] and args[3:] == ["fetch", "origin", "--prune"]:
             return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
         if args == ["git", "rev-parse", "--verify", "mn2/1/phase0"]:
             return subprocess.CompletedProcess(args, 0, stdout="mn2/1/phase0\n", stderr="")
@@ -178,6 +287,7 @@ def test_repository_workspace_manager_lists_allowlisted_merge_targets(monkeypatc
             )
         raise AssertionError(args)
 
+    monkeypatch.setenv("GITHUB_TOKEN", token)
     monkeypatch.setenv("MERGE_TARGET_ALLOWLIST", "main,develop")
     manager = RepositoryWorkspaceManager(git_command_runner=fake_git_runner)
 

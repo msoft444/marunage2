@@ -1,4 +1,5 @@
 import json
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 
@@ -49,6 +50,173 @@ def test_dashboard_lists_newly_submitted_task(db_connection_mock):
     assert create_response["status"] == 201
     created_task_id = create_response["json"]["task"]["id"]
     assert any(task["id"] == created_task_id for task in list_response["json"]["tasks"])
+
+
+def test_dashboard_list_returns_root_tasks_only_and_exposes_orchestration_progress(db_connection_mock, tmp_path):
+    dashboard = SecureDashboard(
+        db_connection=db_connection_mock,
+        secret_scanner=SecretScanner(),
+        workspace_root=tmp_path,
+    )
+
+    create_response = dashboard.serve_request(
+        "POST",
+        "/api/v1/tasks",
+        body=json.dumps(
+            {
+                "task": "README作成",
+                "instruction": "整備",
+                "repository_path": "https://github.com/example/project",
+                "target_ref": "main",
+            }
+        ),
+    )
+    root_task_id = create_response["json"]["task"]["id"]
+
+    list_response = dashboard.serve_request("GET", "/api/v1/tasks", body=None)
+    tasks = list_response["json"]["tasks"]
+    root_task = next(task for task in tasks if task["id"] == root_task_id)
+
+    assert root_task["parent_task_id"] is None
+    assert root_task["root_task_id"] == root_task_id
+    assert root_task["current_phase"] == 0
+    assert root_task["last_completed_phase"] is None
+    assert all(task.get("parent_task_id") is None for task in tasks)
+
+
+def test_dashboard_root_task_detail_includes_subtasks(db_connection_mock, tmp_path):
+    dashboard = SecureDashboard(
+        db_connection=db_connection_mock,
+        secret_scanner=SecretScanner(),
+        workspace_root=tmp_path,
+    )
+
+    create_response = dashboard.serve_request(
+        "POST",
+        "/api/v1/tasks",
+        body=json.dumps(
+            {
+                "task": "README作成",
+                "instruction": "整備",
+                "repository_path": "https://github.com/example/project",
+                "target_ref": "main",
+            }
+        ),
+    )
+    root_task_id = create_response["json"]["task"]["id"]
+
+    detail_response = dashboard.serve_request("GET", f"/api/v1/tasks/{root_task_id}", body=None)
+
+    assert detail_response["status"] == 200
+    assert detail_response["json"]["task"]["id"] == root_task_id
+    assert len(detail_response["json"]["subtasks"]) == 1
+    assert detail_response["json"]["subtasks"][0]["parent_task_id"] == root_task_id
+    assert detail_response["json"]["subtasks"][0]["phase"] == 0
+    assert detail_response["json"]["subtasks"][0]["task_type"] == "phase0_brainstorm"
+
+
+def test_dashboard_root_task_detail_exposes_instruction_and_subtask_metadata(db_connection_mock, tmp_path):
+    dashboard = SecureDashboard(
+        db_connection=db_connection_mock,
+        secret_scanner=SecretScanner(),
+        workspace_root=tmp_path,
+    )
+
+    create_response = dashboard.serve_request(
+        "POST",
+        "/api/v1/tasks",
+        body=json.dumps(
+            {
+                "task": "README作成",
+                "instruction": "1行目\n2行目<script>alert(1)</script>",
+                "repository_path": "https://github.com/example/project",
+                "target_ref": "main",
+            }
+        ),
+    )
+    root_task_id = create_response["json"]["task"]["id"]
+    phase_zero_task = next(task for task in db_connection_mock.tasks.values() if task.get("parent_task_id") == root_task_id)
+    phase_zero_task["payload_json"]["orchestration"]["llm_model"] = "gpt-5.4-mini"
+    phase_zero_task["payload_json"]["orchestration"]["handoff_message"] = "設計へ引き継ぐ\n要点"
+    phase_zero_task["payload_json"]["orchestration"]["phase_summary"] = "要約<script>ignored</script>"
+    phase_zero_task["result_summary_md"] = "phase result"
+
+    detail_response = dashboard.serve_request("GET", f"/api/v1/tasks/{root_task_id}", body=None)
+
+    assert detail_response["status"] == 200
+    assert detail_response["json"]["task"]["instruction"] == "1行目\n2行目<script>alert(1)</script>"
+    assert detail_response["json"]["subtasks"][0]["llm_model"] == "gpt-5.4-mini"
+    assert detail_response["json"]["subtasks"][0]["handoff_message"] == "設計へ引き継ぐ\n要点"
+    assert detail_response["json"]["subtasks"][0]["phase_summary"] == "要約<script>ignored</script>"
+    assert detail_response["json"]["subtasks"][0]["result_summary_md"] == "phase result"
+
+
+def test_dashboard_root_task_detail_sorts_subtasks_by_phase_and_applies_null_fallbacks(db_connection_mock, tmp_path):
+    dashboard = SecureDashboard(
+        db_connection=db_connection_mock,
+        secret_scanner=SecretScanner(),
+        workspace_root=tmp_path,
+    )
+
+    create_response = dashboard.serve_request(
+        "POST",
+        "/api/v1/tasks",
+        body=json.dumps(
+            {
+                "task": "README作成",
+                "instruction": "整備",
+                "repository_path": "https://github.com/example/project",
+                "target_ref": "main",
+            }
+        ),
+    )
+    root_task_id = create_response["json"]["task"]["id"]
+    phase_zero_task = next(task for task in db_connection_mock.tasks.values() if task.get("parent_task_id") == root_task_id)
+    phase_zero_task["payload_json"]["orchestration"]["llm_model"] = None
+    phase_zero_task["payload_json"]["orchestration"]["handoff_message"] = None
+    phase_zero_task["payload_json"]["orchestration"]["phase_summary"] = None
+
+    phase_two_task = {
+        "id": db_connection_mock._next_task_id,
+        "parent_task_id": phase_zero_task["id"],
+        "root_task_id": root_task_id,
+        "task_type": "phase2_test_design",
+        "phase": 2,
+        "status": "queued",
+        "lease_owner": None,
+        "lease_expires_at": None,
+        "assigned_service": "brain",
+        "priority": 0,
+        "workspace_path": phase_zero_task["workspace_path"],
+        "target_repo": phase_zero_task["target_repo"],
+        "target_ref": phase_zero_task["target_ref"],
+        "working_branch": phase_zero_task["working_branch"],
+        "payload_json": {
+            "instruction": "整備",
+            "orchestration": {
+                "phase_flow": [0, 1, 2, 3, 4, 5],
+                "current_phase": 2,
+                "last_completed_phase": 1,
+                "llm_model": "gpt-5.4",
+                "handoff_message": "次へ",
+                "phase_summary": "phase2 summary",
+            },
+        },
+        "approval_required": False,
+        "result_summary_md": "phase 2 result",
+        "started_at": None,
+        "created_at": "t999",
+    }
+    db_connection_mock.tasks[phase_two_task["id"]] = phase_two_task
+    db_connection_mock._next_task_id += 1
+
+    detail_response = dashboard.serve_request("GET", f"/api/v1/tasks/{root_task_id}", body=None)
+
+    assert detail_response["status"] == 200
+    assert [task["phase"] for task in detail_response["json"]["subtasks"]] == [0, 2]
+    assert detail_response["json"]["subtasks"][0]["llm_model"] == "N/A"
+    assert detail_response["json"]["subtasks"][0]["handoff_message"] == "引き継ぎ事項なし"
+    assert detail_response["json"]["subtasks"][0]["phase_summary"] == "-"
 
 
 def test_dashboard_rejects_nonexistent_repository_path(db_connection_mock, tmp_path):
@@ -249,10 +417,14 @@ def test_dashboard_persists_github_repository_url_and_clone_metadata(db_connecti
 
     created_task_id = response["json"]["task"]["id"]
     created_task = db_connection_mock.tasks[created_task_id]
+    phase_zero_task = next(task for task in db_connection_mock.tasks.values() if task.get("parent_task_id") == created_task_id)
     assert response["status"] == 201
     assert response["json"]["task"]["phase"] == 0
     assert response["json"]["task"]["repository_path"] == "https://github.com/example/project.git"
     assert response["json"]["task"]["workspace_path"] == f"/workspace/{created_task_id}"
+    assert created_task["task_type"] == "phase_orchestration_root"
+    assert created_task["status"] == "running"
+    assert created_task["parent_task_id"] is None
     assert created_task["workspace_path"] == f"/workspace/{created_task_id}"
     assert created_task["target_repo"] == "example/project"
     assert created_task["target_ref"] == "develop"
@@ -260,6 +432,71 @@ def test_dashboard_persists_github_repository_url_and_clone_metadata(db_connecti
     assert created_task["approval_required"] is True
     assert created_task["payload_json"]["repository_path"] == "https://github.com/example/project.git"
     assert created_task["payload_json"]["phase_flow"] == [0, 1, 2, 3, 4, 5]
+    assert created_task["payload_json"]["orchestration"]["current_phase"] == 0
+    assert phase_zero_task["task_type"] == "phase0_brainstorm"
+    assert phase_zero_task["phase"] == 0
+    assert phase_zero_task["status"] == "queued"
+    assert phase_zero_task["root_task_id"] == created_task_id
+    assert phase_zero_task["parent_task_id"] == created_task_id
+    assert phase_zero_task["approval_required"] is False
+    assert phase_zero_task["working_branch"] == f"mn2/{created_task_id}/phase0"
+    assert phase_zero_task["payload_json"]["orchestration"]["source_task_id"] == created_task_id
+
+
+def test_dashboard_rolls_back_when_phase0_task_insert_fails(db_connection_mock, tmp_path):
+    initial_tasks = deepcopy(db_connection_mock.tasks)
+    initial_next_task_id = db_connection_mock._next_task_id
+    original_execute = db_connection_mock._execute
+    snapshot: dict | None = None
+
+    def begin_transaction():
+        nonlocal snapshot
+        snapshot = {
+            "tasks": deepcopy(db_connection_mock.tasks),
+            "next_task_id": db_connection_mock._next_task_id,
+        }
+
+    def rollback_transaction():
+        assert snapshot is not None
+        db_connection_mock.tasks = deepcopy(snapshot["tasks"])
+        db_connection_mock._next_task_id = snapshot["next_task_id"]
+
+    def execute_with_phase0_failure(query, params=()):
+        normalized = " ".join(str(query).split())
+        if normalized.startswith("INSERT INTO tasks") and len(params) > 2 and params[2] == "phase0_brainstorm":
+            raise RuntimeError("phase0 insert failed")
+        return original_execute(query, params)
+
+    db_connection_mock.begin.side_effect = begin_transaction
+    db_connection_mock.rollback.side_effect = rollback_transaction
+    db_connection_mock._execute = execute_with_phase0_failure
+
+    dashboard = SecureDashboard(
+        db_connection=db_connection_mock,
+        secret_scanner=SecretScanner(),
+        workspace_root=tmp_path,
+    )
+
+    response = dashboard.serve_request(
+        "POST",
+        "/api/v1/tasks",
+        body=json.dumps(
+            {
+                "task": "README作成",
+                "instruction": "整備",
+                "repository_path": "https://github.com/example/project",
+                "target_ref": "main",
+            }
+        ),
+    )
+
+    assert response["status"] == 500
+    assert response["json"] == {"error": "internal_server_error"}
+    db_connection_mock.begin.assert_called_once()
+    db_connection_mock.rollback.assert_called_once()
+    db_connection_mock.commit.assert_not_called()
+    assert db_connection_mock.tasks == initial_tasks
+    assert db_connection_mock._next_task_id == initial_next_task_id
 
 
 def test_dashboard_persists_repository_path_and_exposes_it(db_connection_mock, tmp_path):

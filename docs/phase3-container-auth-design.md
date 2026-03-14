@@ -13,7 +13,7 @@
 3. `secrets/github_token` ファイルは廃止し、トークンをファイルへ永続化しない。
 4. `brain`、`guardian`、`dashboard`、`librarian` の各コンテナは、起動時に `GITHUB_TOKEN` を環境変数として受け取れること。
 5. ホスト側で `gh` が未導入、未ログイン、または空トークンを返した場合は、コンテナ起動前に即座に失敗させること。
-6. `brain` の git clone / git push は、`GITHUB_TOKEN` を GitHub HTTPS 認証 header として利用し、remote URL や git 設定ファイルへ token を永続化しないこと。
+6. `brain` の git clone / git fetch / git push は、`GITHUB_TOKEN` を GitHub HTTPS 認証 header として利用し、remote URL や git 設定ファイルへ token を永続化しないこと。
 
 ## 1.1 非機能要件
 
@@ -30,7 +30,7 @@
 - ホスト側の起動スクリプトまたはタスクが `gh auth token` を実行する。
 - 取得したトークンは、そのプロセスの環境変数 `GITHUB_TOKEN` として `docker compose` 実行時に注入する。
 - コンテナ内では `GITHUB_TOKEN_FILE` を使用せず、`GITHUB_TOKEN` を直接参照する。
-- `brain` が GitHub HTTPS remote へ `git clone` / `git push` する際は、`GITHUB_TOKEN` から生成した HTTP Authorization header を git コマンドへ一時付与する。`.git/config` の remote URL 書き換えや token 永続保存は行わない。
+- `brain` が GitHub HTTPS remote へ `git clone` / `git fetch` / `git push` する際は、`GITHUB_TOKEN` から生成した HTTP Authorization header を git コマンドへ一時付与する。`.git/config` の remote URL 書き換えや token 永続保存は行わない。
 
 ### 2.2 コンテナ構成
 
@@ -77,7 +77,7 @@
 3. ホスト側の起動導線が `gh auth token` を使って全アプリケーションコンテナ向けの `GITHUB_TOKEN` を注入できる。
 4. `gh` 未導入・未ログイン・空トークンの各ケースで、コンテナ起動前に失敗する。
 5. 運用ドキュメントが新しい起動手順を説明している。
-6. `brain` の GitHub clone / push が `GITHUB_TOKEN` で認証され、token が git remote 設定へ残らない。
+6. `brain` の GitHub clone / fetch / push が `GITHUB_TOKEN` で認証され、token が git remote 設定へ残らない。
 7. `docker-compose.test.yml` のテスト実行が `docker-compose.prod.yml` の MariaDB コンテナや volume と衝突しない。
 
 ## 5. 関連ドキュメント

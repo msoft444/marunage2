@@ -20,6 +20,29 @@ function toStatusClass(status) {
   return String(status).replaceAll(/[^a-zA-Z0-9_-]/g, '-');
 }
 
+function localizeErrorMessage(error, fallback) {
+  const raw = String(error || '');
+  const mappings = [
+    ['working_branch_not_found', '作業ブランチが見つかりません。'],
+    ['merge_target_not_found', '元ブランチが見つかりません。'],
+    ['orchestration_payload_invalid', 'タスク情報の整合性に問題があります。'],
+    ['phase_rework_limit_exceeded', '差し戻し回数の上限に達しました。'],
+    ['root_task_not_found', '親タスクが見つかりません。'],
+    ['task_not_found', 'タスクが見つかりません。'],
+    ['request_failed:404', '対象データが見つかりません。'],
+    ['request_failed:409', '現在の状態ではこの操作を実行できません。'],
+    ['request_failed:500', 'サーバーでエラーが発生しました。'],
+  ];
+
+  for (const [needle, message] of mappings) {
+    if (raw.includes(needle)) {
+      return message;
+    }
+  }
+
+  return fallback;
+}
+
 function renderTaskList(tasks) {
   const list = document.getElementById('task-list');
   if (!list) {
@@ -34,6 +57,7 @@ function renderTaskList(tasks) {
       <div>
         <p class="task-title">#${escapeHtml(task.id)} ${escapeHtml(task.task_type)}</p>
         <p class="task-meta">${escapeHtml(task.assigned_service)} / ${escapeHtml(task.status)}</p>
+        <p class="task-meta">現在フェーズ: ${escapeHtml(task.current_phase ?? '-')} / 最終完了フェーズ: ${escapeHtml(task.last_completed_phase ?? '-')}</p>
         <p class="task-meta">${escapeHtml(task.repository_path || 'repo 未指定')}</p>
       </div>
       <a class="detail-link" href="#/tasks/${encodeURIComponent(task.id)}">詳細を表示</a>
@@ -41,26 +65,104 @@ function renderTaskList(tasks) {
   `).join('');
 }
 
+function setTextContent(element, value, fallback = '') {
+  if (!element) {
+    return;
+  }
+  element.textContent = value == null || value === '' ? fallback : String(value);
+}
+
+function renderSubtaskAccordion(task) {
+  const llmModel = task.llm_model || 'N/A';
+  const handoffMessage = task.handoff_message || '引き継ぎ事項なし';
+  const phaseSummary = task.phase_summary || '要約なし';
+  const resultSummary = task.result_summary_md || '結果なし';
+  const logs = Array.isArray(task.logs) && task.logs.length
+    ? `<ul class="log-list">${task.logs.map((log) => `<li><strong>${escapeHtml(log.service)}</strong> ${escapeHtml(log.event_type)}<br />${escapeHtml(log.message)}</li>`).join('')}</ul>`
+    : '<p class="task-empty">ログなし</p>';
+
+  return `
+    <li class="subtask-item task-status-${toStatusClass(task.status)}">
+      <details class="subtask-accordion">
+        <summary class="subtask-summary">
+          <span>Phase ${escapeHtml(task.phase ?? '-')}</span>
+          <span>${escapeHtml(task.task_type)}</span>
+          <span>${escapeHtml(task.status)}</span>
+          <span>${escapeHtml(llmModel)}</span>
+        </summary>
+        <div class="subtask-details-grid">
+          <div class="detail-text-group">
+            <h5 class="detail-section-title">要約</h5>
+            <pre class="result-card detail-text-block detail-reading-panel">${escapeHtml(phaseSummary)}</pre>
+          </div>
+          <div class="detail-text-group">
+            <h5 class="detail-section-title">引き継ぎ事項</h5>
+            <pre class="result-card detail-text-block detail-reading-panel">${escapeHtml(handoffMessage)}</pre>
+          </div>
+          <div class="detail-text-group">
+            <h5 class="detail-section-title">結果</h5>
+            <pre class="result-card detail-text-block detail-reading-panel">${escapeHtml(resultSummary)}</pre>
+          </div>
+          <div class="detail-text-group">
+            <h5 class="detail-section-title">ログ</h5>
+            ${logs}
+          </div>
+        </div>
+      </details>
+    </li>
+  `;
+}
+
+function renderSubtasks(subtasks) {
+  const panel = document.getElementById('task-subtasks-panel');
+  const list = document.getElementById('task-subtasks');
+  const empty = document.getElementById('task-subtasks-empty');
+  if (!panel || !list || !empty) {
+    return;
+  }
+  list.className = 'subtask-list';
+  panel.hidden = false;
+  if (!subtasks || !subtasks.length) {
+    empty.hidden = false;
+    list.innerHTML = '';
+    return;
+  }
+  empty.hidden = true;
+  list.innerHTML = subtasks.map((task) => renderSubtaskAccordion(task)).join('');
+}
+
 function renderTaskDetail(payload) {
   const title = document.getElementById('task-detail-title');
   const meta = document.getElementById('task-detail-meta');
   const logs = document.getElementById('task-detail-logs');
   const result = document.getElementById('task-detail-result');
-  if (!title || !meta || !logs || !result) {
+  const instructionPanel = document.getElementById('task-detail-instruction-panel');
+  const instruction = document.getElementById('task-detail-instruction');
+  if (!title || !meta || !logs || !result || !instructionPanel || !instruction) {
     return;
   }
-  title.textContent = `Task #${payload.task.id}`;
+  title.textContent = `タスク #${payload.task.id}`;
   meta.innerHTML = `
-    <div><dt>Status</dt><dd>${escapeHtml(payload.task.status)}</dd></div>
-    <div><dt>Service</dt><dd>${escapeHtml(payload.task.assigned_service)}</dd></div>
-    <div><dt>Type</dt><dd>${escapeHtml(payload.task.task_type)}</dd></div>
-    <div><dt>Repository</dt><dd>${escapeHtml(payload.task.repository_path || 'repo 未指定')}</dd></div>
-    <div><dt>Target Branch</dt><dd>${escapeHtml(payload.task.target_ref || '未指定')}</dd></div>
+    <div><dt>状態</dt><dd>${escapeHtml(payload.task.status)}</dd></div>
+    <div><dt>担当サービス</dt><dd>${escapeHtml(payload.task.assigned_service)}</dd></div>
+    <div><dt>種別</dt><dd>${escapeHtml(payload.task.task_type)}</dd></div>
+    <div><dt>現在フェーズ</dt><dd>${escapeHtml(payload.task.current_phase ?? '-')}</dd></div>
+    <div><dt>最終完了フェーズ</dt><dd>${escapeHtml(payload.task.last_completed_phase ?? '-')}</dd></div>
+    <div><dt>対象リポジトリ</dt><dd>${escapeHtml(payload.task.repository_path || 'repo 未指定')}</dd></div>
+    <div><dt>元ブランチ</dt><dd>${escapeHtml(payload.task.target_ref || '未指定')}</dd></div>
   `;
+  if (payload.task.instruction) {
+    instructionPanel.hidden = false;
+    setTextContent(instruction, payload.task.instruction);
+  } else {
+    instructionPanel.hidden = true;
+    setTextContent(instruction, '');
+  }
+  renderSubtasks(payload.subtasks || []);
   logs.innerHTML = payload.logs.length
     ? payload.logs.map((log) => `<li><strong>${escapeHtml(log.service)}</strong> ${escapeHtml(log.event_type)}<br />${escapeHtml(log.message)}</li>`).join('')
-    : '<li class="task-empty">ログはまだありません。</li>';
-  result.innerHTML = payload.result_html || '<p>結果はまだありません。</p>';
+    : '<li class="task-empty">ログなし</li>';
+  result.innerHTML = payload.result_html || '<p>結果なし</p>';
   void renderApprovalPanel(payload.task);
 }
 
@@ -153,7 +255,7 @@ async function renderApprovalPanel(task) {
       approveButton.disabled = true;
       rejectButton.disabled = true;
     } else {
-      state.textContent = `承認情報の取得に失敗しました: ${String(error)}`;
+      state.textContent = localizeErrorMessage(error, '承認情報の取得に失敗しました。');
     }
     diffPreview.textContent = '';
   }
@@ -190,7 +292,7 @@ async function loadRepositoryBranches() {
   } catch (error) {
     targetRef.innerHTML = '<option value="">候補ブランチを選択</option>';
     targetRef.disabled = true;
-    message.textContent = `ブランチ一覧の取得に失敗しました: ${String(error)}`;
+    message.textContent = localizeErrorMessage(error, 'ブランチ一覧の取得に失敗しました。');
   }
 }
 
@@ -234,7 +336,7 @@ async function submitTask() {
     window.location.hash = `#/tasks/${payload.task.id}`;
   } catch (error) {
     state.textContent = 'error';
-    message.textContent = `投稿に失敗しました: ${String(error)}`;
+    message.textContent = localizeErrorMessage(error, '投稿に失敗しました。');
   }
 }
 

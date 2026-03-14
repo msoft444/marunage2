@@ -28,7 +28,10 @@ class TaskRow:
 @dataclass(frozen=True)
 class QueueTaskRow:
     id: int
+    parent_task_id: int | None
     root_task_id: int
+    task_type: str
+    phase: int
     status: str
     assigned_service: str
     priority: int
@@ -38,6 +41,7 @@ class QueueTaskRow:
     target_ref: str | None = None
     working_branch: str | None = None
     approval_required: bool = False
+    result_summary_md: str | None = None
 
 
 @dataclass(frozen=True)
@@ -130,7 +134,7 @@ class MariaDBAccessor:
 
     def select_next_queued_task(self, service_name: str) -> QueueTaskRow | None:
         query = (
-            "SELECT id, root_task_id, status, assigned_service, priority, payload_json, workspace_path, target_repo, target_ref, working_branch, approval_required "
+            "SELECT id, parent_task_id, root_task_id, task_type, phase, status, assigned_service, priority, payload_json, workspace_path, target_repo, target_ref, working_branch, approval_required, result_summary_md "
             "FROM tasks WHERE assigned_service = %s AND status = 'queued' "
             "ORDER BY priority DESC, created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED"
         )
@@ -142,6 +146,95 @@ class MariaDBAccessor:
         if isinstance(payload_json, str):
             row["payload_json"] = json.loads(payload_json)
         return QueueTaskRow(**row)
+
+    def select_orchestration_task_for_update(self, task_id: int) -> QueueTaskRow:
+        query = (
+            "SELECT id, parent_task_id, root_task_id, task_type, phase, status, assigned_service, priority, payload_json, workspace_path, target_repo, target_ref, working_branch, approval_required, result_summary_md "
+            "FROM tasks WHERE id = %s FOR UPDATE"
+        )
+        cursor = self._execute(query, (task_id,))
+        row = self._fetchone_dict(cursor)
+        if row is None:
+            raise TaskConsistencyError(f"task {task_id} does not exist")
+        payload_json = row.get("payload_json")
+        if isinstance(payload_json, str):
+            row["payload_json"] = json.loads(payload_json)
+        return QueueTaskRow(**row)
+
+    def select_active_phase_task(self, root_task_id: int, phase: int) -> QueueTaskRow | None:
+        query = (
+            "SELECT id, parent_task_id, root_task_id, task_type, phase, status, assigned_service, priority, payload_json, workspace_path, target_repo, target_ref, working_branch, approval_required, result_summary_md "
+            "FROM tasks WHERE root_task_id = %s AND phase = %s "
+            "AND status IN ('queued', 'leased', 'running', 'waiting_approval') "
+            "ORDER BY id DESC LIMIT 1 FOR UPDATE"
+        )
+        cursor = self._execute(query, (root_task_id, phase))
+        row = self._fetchone_dict(cursor)
+        if row is None:
+            return None
+        payload_json = row.get("payload_json")
+        if isinstance(payload_json, str):
+            row["payload_json"] = json.loads(payload_json)
+        return QueueTaskRow(**row)
+
+    def insert_task(
+        self,
+        *,
+        parent_task_id: int | None,
+        root_task_id: int,
+        task_type: str,
+        phase: int,
+        status: str,
+        requested_by_role: str,
+        assigned_role: str,
+        assigned_service: str,
+        priority: int,
+        workspace_path: str | None,
+        target_repo: str | None,
+        target_ref: str | None,
+        working_branch: str | None,
+        payload_json: dict[str, Any] | None,
+        retry_count: int,
+        max_retry: int,
+        approval_required: bool,
+    ) -> int:
+        query = (
+            "INSERT INTO tasks ("
+            "parent_task_id, root_task_id, task_type, phase, status, requested_by_role, assigned_role, assigned_service, "
+            "priority, workspace_path, target_repo, target_ref, working_branch, payload_json, retry_count, max_retry, approval_required"
+            ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+        )
+        cursor = self._execute(
+            query,
+            (
+                parent_task_id,
+                root_task_id,
+                task_type,
+                phase,
+                status,
+                requested_by_role,
+                assigned_role,
+                assigned_service,
+                priority,
+                workspace_path,
+                target_repo,
+                target_ref,
+                working_branch,
+                json.dumps(payload_json, ensure_ascii=False) if payload_json is not None else None,
+                retry_count,
+                max_retry,
+                approval_required,
+            ),
+        )
+        lastrowid = getattr(cursor, "lastrowid", None)
+        if lastrowid is None:
+            raise TaskConsistencyError("could not determine inserted task id")
+        return int(lastrowid)
+
+    def update_task_payload_json(self, task_id: int, payload_json: dict[str, Any]) -> bool:
+        query = "UPDATE tasks SET payload_json = %s WHERE id = %s"
+        cursor = self._execute(query, (json.dumps(payload_json, ensure_ascii=False), task_id))
+        return bool(cursor.rowcount)
 
     def select_task_workspace_path(self, task_id: int) -> str | None:
         query = "SELECT workspace_path, target_repo FROM tasks WHERE id = %s"

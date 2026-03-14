@@ -20,9 +20,9 @@ When the user types these labels, follow the instructions:
 - **bd**: Read the existing `docs/` conventions and complete the basic design plus non-functional requirements in the appropriate `docs/` files only. Do not write tests or implementation code.
 - **dt**: Read the current design docs and produce destructive test design in the appropriate `docs/` files only. Logically break the design and define acceptance criteria including abnormal cases such as MCP connection failure, DB inconsistency, and huge files.
 - **go**: Read `Current Objective` in `.tdd_protocol.md`, first update the relevant `docs/` files if requirements/basic design/detailed design changed, then sync `.tdd_protocol.md` and start implementation from RED tests.
-- **aa**: Read `Current Objective` in `.tdd_protocol.md` and audit the changes (APPROVED/REJECTED).
+- **aa**: Read `Current Objective` in `.tdd_protocol.md` and execute a strict audit. Requirements/design (`docs/`) ↔ source ↔ tests の意味論整合を検証し、simulated mutation testing で変異耐性を確認せよ。出力は (1) findings（重大度順・ファイル参照付き）, (2) open questions, (3) summary, (4) verdict `APPROVED` or `REJECTED`。
 - **ff**: Read `Opus Findings` in `.tdd_protocol.md` and fix the issues.
-- **rr**: Rebuild the docker-compose environment and verify headers.
+- **rr**: production 環境を対象に `python3.11 scripts/gh_token_compose.py up --build -d`（または同等の `GITHUB_TOKEN` 注入付き compose 実行）で docker-compose を再構築・再起動し、`GET /` と `GET /api/v1/health` の HTTP ヘッダを確認せよ。必要なら `docker compose -f docker-compose.prod.yml logs` / `ps` で安定起動まで確認する。
 - **cp** = 次の手順を順に実行せよ。
   1. `git add .` を実行。
   2. `.tdd_protocol.md` の `Current Objective` と `.tdd_activitylog.md` の最新ログを元に、日本語で簡潔かつ具体的なコミットメッセージを生成。
