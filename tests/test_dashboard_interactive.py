@@ -773,6 +773,65 @@ def test_dashboard_task_detail_includes_logs_and_result(db_connection_mock):
     assert response["json"]["logs"][0]["event_type"] == "task_started"
 
 
+def test_dashboard_root_task_detail_includes_compose_validation_logs_with_details(db_connection_mock, tmp_path):
+    dashboard = SecureDashboard(
+        db_connection=db_connection_mock,
+        secret_scanner=SecretScanner(),
+        workspace_root=tmp_path,
+    )
+
+    create_response = dashboard.serve_request(
+        "POST",
+        "/api/v1/tasks",
+        body=json.dumps(
+            {
+                "task": "README作成",
+                "instruction": "整備",
+                "repository_path": "https://github.com/example/project",
+                "target_ref": "main",
+            }
+        ),
+    )
+    root_task_id = create_response["json"]["task"]["id"]
+    phase_zero_task = next(task for task in db_connection_mock.tasks.values() if task.get("parent_task_id") == root_task_id)
+
+    db_connection_mock.logs.append(
+        {
+            "task_id": phase_zero_task["id"],
+            "root_task_id": root_task_id,
+            "service": "brain",
+            "event_type": "compose_validation_blocked",
+            "message": "Compose validation failed",
+            "details_json": {
+                "blocked_reason": "compose_validation",
+                "blocked_reason_label": "Compose Validation",
+                "violations": [
+                    {
+                        "compose_file": "docker-compose.yml",
+                        "service": "app",
+                        "field": "privileged",
+                        "rule_id": "privileged_container",
+                        "raw_value": True,
+                        "message": "privileged is not allowed",
+                    }
+                ],
+            },
+        }
+    )
+
+    detail_response = dashboard.serve_request("GET", f"/api/v1/tasks/{root_task_id}", body=None)
+
+    assert detail_response["status"] == 200
+    compose_log = next(log for log in detail_response["json"]["logs"] if log["event_type"] == "compose_validation_blocked")
+    subtask_compose_log = next(
+        log for log in detail_response["json"]["subtasks"][0]["logs"] if log["event_type"] == "compose_validation_blocked"
+    )
+    assert compose_log["task_id"] == phase_zero_task["id"]
+    assert compose_log["details"]["blocked_reason"] == "compose_validation"
+    assert compose_log["details"]["violations"][0]["rule_id"] == "privileged_container"
+    assert subtask_compose_log["details"]["violations"][0]["field"] == "privileged"
+
+
 def test_dashboard_serializes_datetime_fields_in_task_responses(db_connection_mock):
     dashboard = SecureDashboard(db_connection=db_connection_mock, secret_scanner=SecretScanner())
     created_at = datetime(2026, 3, 8, 12, 34, 56)

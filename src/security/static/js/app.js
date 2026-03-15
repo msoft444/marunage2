@@ -72,13 +72,86 @@ function setTextContent(element, value, fallback = '') {
   element.textContent = value == null || value === '' ? fallback : String(value);
 }
 
+function getLogDetails(log) {
+  if (!log || typeof log !== 'object') {
+    return null;
+  }
+  const details = log.details ?? log.details_json ?? null;
+  return details && typeof details === 'object' ? details : null;
+}
+
+function formatLogValue(value) {
+  if (value == null || value === '') {
+    return '-';
+  }
+  if (typeof value === 'object') {
+    return JSON.stringify(value);
+  }
+  return String(value);
+}
+
+function renderViolationRows(violations) {
+  return violations.map((violation) => `
+    <tr>
+      <td>${escapeHtml(formatLogValue(violation.compose_file))}</td>
+      <td>${escapeHtml(formatLogValue(violation.service))}</td>
+      <td>${escapeHtml(formatLogValue(violation.field))}</td>
+      <td>${escapeHtml(formatLogValue(violation.rule_id))}</td>
+      <td>${escapeHtml(formatLogValue(violation.raw_value))}</td>
+      <td>${escapeHtml(formatLogValue(violation.message))}</td>
+    </tr>
+  `).join('');
+}
+
+function renderLogItem(log) {
+  const details = getLogDetails(log);
+  const violations = Array.isArray(details?.violations) ? details.violations : [];
+  if (log.event_type === 'compose_validation_blocked' || violations.length) {
+    const blockedLabel = details?.blocked_reason === 'compose_validation' || violations.length
+      ? 'Compose Validation により安全側でブロック'
+      : (details?.blocked_reason_label || log.event_type);
+    const violationContent = violations.length
+      ? `
+        <div class="log-violation-wrap">
+          <table class="log-violation-table">
+            <thead>
+              <tr>
+                <th>ファイル</th>
+                <th>サービス</th>
+                <th>フィールド</th>
+                <th>ルール</th>
+                <th>値</th>
+                <th>メッセージ</th>
+              </tr>
+            </thead>
+            <tbody>${renderViolationRows(violations)}</tbody>
+          </table>
+        </div>
+      `
+      : '<p class="task-empty">violation 詳細なし</p>';
+    return `
+      <li class="log-blocked-reason">
+        <div class="log-blocked-title">${escapeHtml(blockedLabel)}</div>
+        <p class="log-blocked-meta"><strong>${escapeHtml(log.service || '-')}</strong> ${escapeHtml(log.event_type || '-')}</p>
+        <p class="log-blocked-message">${escapeHtml(log.message || 'Compose validation failed')}</p>
+        ${violationContent}
+      </li>
+    `;
+  }
+  return `<li><strong>${escapeHtml(log.service)}</strong> ${escapeHtml(log.event_type)}<br />${escapeHtml(log.message)}</li>`;
+}
+
+function renderLogItems(logs) {
+  return logs.map((log) => renderLogItem(log)).join('');
+}
+
 function renderSubtaskAccordion(task) {
   const llmModel = task.llm_model || 'N/A';
   const handoffMessage = task.handoff_message || '引き継ぎ事項なし';
   const phaseSummary = task.phase_summary || '要約なし';
   const resultSummary = task.result_summary_md || '結果なし';
   const logs = Array.isArray(task.logs) && task.logs.length
-    ? `<ul class="log-list">${task.logs.map((log) => `<li><strong>${escapeHtml(log.service)}</strong> ${escapeHtml(log.event_type)}<br />${escapeHtml(log.message)}</li>`).join('')}</ul>`
+    ? `<ul class="log-list">${renderLogItems(task.logs)}</ul>`
     : '<p class="task-empty">ログなし</p>';
 
   return `
@@ -160,7 +233,7 @@ function renderTaskDetail(payload) {
   }
   renderSubtasks(payload.subtasks || []);
   logs.innerHTML = payload.logs.length
-    ? payload.logs.map((log) => `<li><strong>${escapeHtml(log.service)}</strong> ${escapeHtml(log.event_type)}<br />${escapeHtml(log.message)}</li>`).join('')
+    ? renderLogItems(payload.logs)
     : '<li class="task-empty">ログなし</li>';
   result.innerHTML = payload.result_html || '<p>結果なし</p>';
   void renderApprovalPanel(payload.task);

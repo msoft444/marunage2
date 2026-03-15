@@ -240,6 +240,54 @@ select:disabled {
   background: rgba(255, 255, 255, 0.7);
 }
 
+.log-blocked-reason {
+  display: grid;
+  gap: 10px;
+  border-color: #e3b56a;
+  background: #fff7e8;
+}
+
+.log-blocked-title {
+  margin: 0;
+  color: #8a4b08;
+  font-weight: 800;
+}
+
+.log-blocked-meta,
+.log-blocked-message {
+  margin: 0;
+}
+
+.log-violation-wrap {
+  overflow-x: auto;
+  overflow-y: auto;
+  max-height: 400px;
+}
+
+.log-violation-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 0.95rem;
+}
+
+.log-violation-table th,
+.log-violation-table td {
+  padding: 8px 10px;
+  border-top: 1px solid rgba(214, 201, 178, 0.9);
+  text-align: left;
+  vertical-align: top;
+  word-break: break-all;
+  overflow-wrap: break-word;
+}
+
+.log-violation-table th {
+  color: var(--accent-strong);
+  background: rgba(255, 248, 235, 0.95);
+  position: sticky;
+  top: 0;
+}
+
 .task-title {
   margin: 0 0 6px;
   font-weight: 700;
@@ -352,6 +400,10 @@ select:disabled {
 
 .task-status-blocked {
   border-color: #d97706;
+}
+
+.task-status-failed {
+  border-color: #b91c1c;
 }
 
 .task-status-queued {

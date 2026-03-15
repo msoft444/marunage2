@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 from typing import Any, Callable
 
+from security.compose_validator import ComposeValidator
+
 from .contracts import ContractValidationError, ModelContractCodec
 from .database import LeaseConflictError, MariaDBAccessor, TaskConsistencyError
 from .llm_client import (
@@ -177,6 +179,15 @@ class MariaDBTaskBackend:
                     f"Repository prepared in {prepared_paths['repo_path']}",
                     worker_name,
                 )
+                if self._compose_validation_required(task):
+                    if not self._validate_repository_compose(
+                        task,
+                        service_name=service_name,
+                        worker_name=worker_name,
+                        workspace_path=normalized_workspace_path,
+                        repo_path=prepared_paths["repo_path"],
+                    ):
+                        return True
                 self.db.insert_log(
                     task.id,
                     task.root_task_id,
@@ -582,6 +593,69 @@ class MariaDBTaskBackend:
     def _build_handoff_message(summary: str) -> str:
         stripped = summary.strip()
         return stripped or "引き継ぎ事項なし"
+
+    @staticmethod
+    def _compose_validation_required(task) -> bool:
+        if not isinstance(task.payload_json, dict):
+            return False
+        if task.payload_json.get("compose_validation_required") is True:
+            return True
+        return task.payload_json.get("runtime_spec_json") is not None
+
+    def _validate_repository_compose(
+        self,
+        task,
+        *,
+        service_name: str,
+        worker_name: str,
+        workspace_path: str,
+        repo_path: str,
+    ) -> bool:
+        runtime_root = Path(workspace_path) / "runtime"
+        validator = ComposeValidator(repo_root=repo_path, runtime_root=runtime_root)
+        self.db.insert_log(
+            task.id,
+            task.root_task_id,
+            service_name,
+            "compose_validation_started",
+            "Compose validation started",
+            worker_name,
+            details_json={
+                "repo_path": str(Path(repo_path).resolve(strict=False)),
+                "runtime_root": str(runtime_root.resolve(strict=False)),
+            },
+        )
+        result = validator.validate()
+        if result["blocked"]:
+            blocked = self.db.update_task_status(task.id, "running", "blocked")
+            if not blocked:
+                raise TaskConsistencyError(f"task {task.id} could not be blocked after compose validation failure")
+            self.db.insert_log(
+                task.id,
+                task.root_task_id,
+                service_name,
+                "compose_validation_blocked",
+                "Compose validation failed",
+                worker_name,
+                details_json=result,
+            )
+            self.phase_orchestrator.handle_phase_blocked(
+                task,
+                service_name=service_name,
+                worker_name=worker_name,
+                reason="compose_validation_blocked",
+            )
+            return False
+        self.db.insert_log(
+            task.id,
+            task.root_task_id,
+            service_name,
+            "compose_validation_passed",
+            "Compose validation passed",
+            worker_name,
+            details_json=result,
+        )
+        return True
 
     @staticmethod
     def _extract_instruction(payload_json: dict[str, Any] | None) -> str | None:

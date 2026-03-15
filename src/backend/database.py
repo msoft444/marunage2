@@ -297,14 +297,33 @@ class MariaDBAccessor:
         cursor = self._execute(query, (task_id, lease_owner))
         return bool(cursor.rowcount)
 
-    def insert_log(self, task_id: int, root_task_id: int, service: str, event_type: str, message: str, trace_id: str) -> bool:
+    def insert_log(
+        self,
+        task_id: int,
+        root_task_id: int,
+        service: str,
+        event_type: str,
+        message: str,
+        trace_id: str,
+        details_json: dict[str, Any] | None = None,
+    ) -> bool:
         query = (
             "INSERT INTO logs (task_id, root_task_id, service, component, level, event_type, message, details_json, trace_id) "
             "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
         )
         cursor = self._execute(
             query,
-            (task_id, root_task_id, service, "worker_engine", "INFO", event_type, message, None, trace_id),
+            (
+                task_id,
+                root_task_id,
+                service,
+                "worker_engine",
+                "INFO",
+                event_type,
+                message,
+                json.dumps(details_json, ensure_ascii=False) if details_json is not None else None,
+                trace_id,
+            ),
         )
         return bool(cursor.rowcount)
 

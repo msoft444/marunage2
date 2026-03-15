@@ -336,7 +336,7 @@ class FakeMariaDBConnection:
                     }
                 )
             return FakeCursor(rows, len(rows))
-        if normalized.startswith("SELECT task_id, root_task_id, service, event_type, message, created_at FROM logs WHERE task_id = %s ORDER BY id ASC"):
+        if normalized.startswith("SELECT task_id, root_task_id, service, event_type, message, details_json, created_at FROM logs WHERE task_id = %s ORDER BY id ASC"):
             task_id = params[0]
             rows = []
             for index, log in enumerate(self.logs, start=1):
@@ -349,6 +349,25 @@ class FakeMariaDBConnection:
                         "service": log["service"],
                         "event_type": log["event_type"],
                         "message": log["message"],
+                        "details_json": log.get("details_json"),
+                        "created_at": log.get("created_at", f"l{index}"),
+                    }
+                )
+            return FakeCursor(rows, len(rows))
+        if normalized.startswith("SELECT task_id, root_task_id, service, event_type, message, details_json, created_at FROM logs WHERE root_task_id = %s ORDER BY id ASC"):
+            root_task_id = params[0]
+            rows = []
+            for index, log in enumerate(self.logs, start=1):
+                if log["root_task_id"] != root_task_id:
+                    continue
+                rows.append(
+                    {
+                        "task_id": log["task_id"],
+                        "root_task_id": log["root_task_id"],
+                        "service": log["service"],
+                        "event_type": log["event_type"],
+                        "message": log["message"],
+                        "details_json": log.get("details_json"),
                         "created_at": log.get("created_at", f"l{index}"),
                     }
                 )
@@ -488,7 +507,7 @@ class FakeMariaDBConnection:
             return FakeCursor([], 1)
         if normalized.startswith("INSERT INTO logs"):
             if len(params) == 9:
-                task_id, root_task_id, service, _component, _level, event_type, message, _details_json, _trace_id = params
+                task_id, root_task_id, service, _component, _level, event_type, message, details_json, _trace_id = params
                 self.logs.append(
                     {
                         "task_id": task_id,
@@ -496,10 +515,11 @@ class FakeMariaDBConnection:
                         "service": service,
                         "event_type": event_type,
                         "message": message,
+                        "details_json": json.loads(details_json) if isinstance(details_json, str) else details_json,
                     }
                 )
             elif len(params) == 4:
-                event_type, message, _details_json, trace_id = params
+                event_type, message, details_json, trace_id = params
                 self.logs.append(
                     {
                         "task_id": None,
@@ -507,6 +527,7 @@ class FakeMariaDBConnection:
                         "service": "librarian",
                         "event_type": event_type,
                         "message": message,
+                        "details_json": json.loads(details_json) if isinstance(details_json, str) else details_json,
                         "trace_id": trace_id,
                     }
                 )

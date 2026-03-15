@@ -345,9 +345,34 @@
 36. **色階層分離**: セクション見出し・本文・メタデータが 3 層の色階層として機能し、同一色に崩壊していないこと（ODT-42）。
 37. **hover/disabled 耐性**: hover / disabled 表示で読み物パネルの本文色が通常時と同値を維持し、可読性が低下しないこと（ODT-43）。
 
+### 3.12 Compose Validation blocked 理由の UI 表示（ODT-44〜ODT-46）
+
+38. **API ログに details_json 含有**: child task の `compose_validation_blocked` ログが `details_json`（violation 詳細）付きで API レスポンスに含まれること（ODT-44）。
+39. **violation 構造化描画**: subtask ログ内の `compose_validation_blocked` で violation テーブル（file / field / rule_id / raw_value）が描画されること（ODT-45）。
+40. **blocked vs failed 区別**: blocked child task が failed と視覚的に区別され、compose_validation_blocked には「安全側ブロック」日本語ラベルが適用されること（ODT-46）。
+
 ## 4. 設計へのフィードバック
 
 本書で設計書 `docs/phase6-orchestration-design.md` の未確定事項を確定する。
+
+### ODT-44: `compose_validation_blocked` ログの `details_json` が API レスポンスに含まれない
+
+- 攻撃シナリオ: child task が `compose_validation_blocked` で blocked になり、DB の `logs.details_json` に violation 詳細が保存されているが、root task detail API のログ SELECT が `details_json` カラムを含まない。さらに root task detail のログクエリは `WHERE task_id = %s` で root task 自身のログのみを返し、child task のログが含まれない。
+- Red 条件: API レスポンスのログオブジェクトに `details` / `details_json` フィールドが含まれず、またはログが root task 分のみで child task の `compose_validation_blocked` ログが返されない。フロントエンドが violation 詳細表示用のデータを取得できない。
+- Green 条件: root task detail API のログ SELECT に `details_json` カラムが含まれ、かつ `root_task_id` で紐づく child task 分のログもまとめて返されること。§2.3.2「compose_validation_blocked ログは通常ログの一行表示で埋もれさせず」、§3.1.1「details_json.violations[] は child task detail API の logs 経由で欠落なく返し」が遵守されること。
+
+### ODT-45: subtask ログで `compose_validation_blocked` の violation テーブルが描画されない
+
+- 攻撃シナリオ: API が `details_json.violations[]` を正しく返しているが、フロントエンドの log 描画関数が全ログを一律に `message` テキストのみで描画し、`event_type` を判定して構造化レンダリングへ分岐しない。subtask アコーディオン内のログと root task detail 下部のログ一覧の両方で violation がテーブル表示されない。
+- Red 条件: `compose_validation_blocked` ログが他のログと同一のテキスト行として描画され、violation の file / field / rule_id / raw_value が読めない。
+- Green 条件: フロントエンドのログ描画関数が `event_type === 'compose_validation_blocked'` かつ `details.violations` の存在を検出し、violation テーブル（日本語ヘッダ：ファイル / サービス / フィールド / ルール / 値 / メッセージ）を描画すること。§2.3.2「表示内容は最低限 compose_file, service, field, rule_id, raw_value, message を含む」が遵守されること。
+
+### ODT-46: blocked child task が failed と同一スタイルで描画され、安全側ブロックと実行エラーが区別されない
+
+- 攻撃シナリオ: child task が `blocked` のとき、subtask アコーディオンのサマリーが `failed` と同じ赤背景/赤テキストで描画される。日本語ラベルも「失敗」と表示され、「Compose Validation により安全側でブロック」の説明がない。利用者は compose 設定を修正すべきなのか、システム障害なのか判別できない。
+- Red 条件: blocked child task が failed と同一スタイル(赤色系)で描画され、`compose_validation_blocked` の日本語説明ラベルが表示されない。
+- Green 条件: `blocked` と `failed` に異なるスタイルが適用されること（blocked はアンバー/オレンジ系、failed は赤系）。`compose_validation_blocked` ログには「⚠ Compose Validation により安全側でブロック」の日本語見出しが表示されること。§2.3.2「blocked_reason=compose_validation を持つ場合、UI は『エラー』ではなく『Compose Validation により安全側でブロック』のような日本語説明を優先表示」§1.1 NF-15 が遵守されること。
+
 
 ### ODT-06 確定: 差し戻し回数上限
 
@@ -412,9 +437,27 @@
 - root detail の表示順は「概要（status / repository / branch / current_phase / last_completed_phase） → 依頼本文（instruction） → サブタスク（accordion） → 承認パネル」とする。
 - subtask 展開領域の内部順は「要約 → 引き継ぎ事項 → 結果 → ログ」とする。
 
+### ODT-44 確定: API ログに `details_json` を含める
+
+- `_get_task_detail()` のログ SELECT に `details_json` カラムを追加し、各ログオブジェクトに `details` フィールドとして JSON パース済みのデータを返す。`details_json` が NULL の場合は `null` を返す。不正 JSON の場合は `null` にフォールバックする。
+- root task の場合、ログクエリは `WHERE root_task_id = %s OR task_id = %s` として child task 分のログも返す。これにより `compose_validation_blocked` ログが root task detail から直接確認可能になる。
+
+### ODT-45 確定: フロントエンド violation 構造化描画
+
+- ログ描画関数に `event_type === 'compose_validation_blocked'` 分岐を追加する。`details.violations` が配列かつ非空の場合、violation テーブル（日本語ヘッダ）を描画する。テーブルヘッダは「ファイル」「サービス」「フィールド」「ルール」「値」「メッセージ」とする。
+- 同一の描画関数を subtask アコーディオン内ログと root task detail ログの両方で使用し、表示の一貫性を保つ。
+- violation フィールドはすべて `escapeHtml()` 経由で描画し、XSS を防止する。
+
+### ODT-46 確定: blocked / failed の CSS 区別
+
+- `task-status-blocked` に amber / orange 系の背景/ボーダーを適用し、`task-status-failed` の赤系と区別する。
+- `compose_validation_blocked` ログには「⚠ Compose Validation により安全側でブロック」の日本語見出しを表示する。
+
 ## 5. 関連ドキュメント
 
 1. `docs/phase6-orchestration-design.md`
 2. `docs/phase6-direct-edit-design.md`
 3. `docs/phase6-direct-edit-destructive-test-design.md`
-4. `.tdd_protocol.md`
+4. `docs/phase7-compose-validation-design.md`
+5. `docs/phase7-compose-validation-destructive-test-design.md`
+6. `.tdd_protocol.md`

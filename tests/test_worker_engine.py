@@ -235,6 +235,61 @@ def test_worker_blocks_task_when_instruction_is_missing(db_connection_mock):
     assert any(log["event_type"] == "invalid_instruction" for log in db_connection_mock.logs)
 
 
+def test_worker_blocks_repository_task_when_compose_validation_fails(db_connection_mock, tmp_path):
+    class FakeLLMClient:
+        def generate(self, prompt: str, metadata: dict | None = None) -> str:
+            raise AssertionError("LLM must not run when compose validation fails")
+
+    db_connection_mock.tasks[1]["workspace_path"] = str(tmp_path / "1")
+    db_connection_mock.tasks[1]["target_repo"] = "example/project"
+    db_connection_mock.tasks[1]["target_ref"] = "main"
+    db_connection_mock.tasks[1]["working_branch"] = "mn2/1/phase0"
+    db_connection_mock.tasks[1]["approval_required"] = True
+    db_connection_mock.tasks[1]["payload_json"] = {
+        "task": "compose を含むアプリを更新",
+        "instruction": "compose を含むアプリを更新する",
+        "compose_validation_required": True,
+    }
+
+    engine = WorkerEngine(
+        db_connection_mock,
+        service_name="brain",
+        worker_name="worker-brain-1",
+        llm_client=FakeLLMClient(),
+        workspace_root=tmp_path,
+    )
+
+    class FakeRepositoryWorkspace:
+        def prepare_repository(self, **kwargs):
+            workspace_path = tmp_path / "1"
+            repo_path = workspace_path / "repo"
+            repo_path.mkdir(parents=True, exist_ok=True)
+            (repo_path / "compose.yml").write_text(
+                "services:\n  web:\n    image: nginx\n    privileged: true\n",
+                encoding="utf-8",
+            )
+            return {
+                "workspace_path": str(workspace_path),
+                "repo_path": str(repo_path),
+                "artifacts_path": str(workspace_path / "artifacts"),
+                "docs_snapshot_path": str(workspace_path / "system_docs_snapshot"),
+                "patches_path": str(workspace_path / "patches"),
+            }
+
+        def commit_and_push(self, **kwargs):
+            raise AssertionError("commit_and_push must not run when compose validation fails")
+
+    engine.task_backend.repository_workspace = FakeRepositoryWorkspace()
+
+    processed = engine.run_once()
+
+    assert processed is True
+    assert db_connection_mock.tasks[1]["status"] == "blocked"
+    assert any(log["event_type"] == "compose_validation_started" for log in db_connection_mock.logs)
+    blocked_log = next(log for log in db_connection_mock.logs if log["event_type"] == "compose_validation_blocked")
+    assert blocked_log["details_json"]["violations"][0]["rule_id"] == "privileged_container"
+
+
 def test_worker_generates_llm_response_commits_changes_and_marks_waiting_approval_for_github_clone_task(db_connection_mock, tmp_path):
     prompts: list[str] = []
 

@@ -124,6 +124,19 @@ def test_dashboard_static_asset_is_served_with_javascript_mime_type():
     assert "ログなし" in response["body"]
     assert '<li class="task-empty">ログなし</li>' in response["body"]
     assert '<p>結果なし</p>' in response["body"]
+    assert "compose_validation_blocked" in response["body"]
+    assert "Compose Validation により安全側でブロック" in response["body"]
+    assert "violations" in response["body"]
+    assert "violation 詳細なし" in response["body"]
+    assert "escapeHtml(formatLogValue(violation.compose_file))" in response["body"]
+    assert "escapeHtml(formatLogValue(violation.service))" in response["body"]
+    assert "escapeHtml(formatLogValue(violation.field))" in response["body"]
+    assert "escapeHtml(formatLogValue(violation.rule_id))" in response["body"]
+    assert "escapeHtml(formatLogValue(violation.raw_value))" in response["body"]
+    assert "escapeHtml(formatLogValue(violation.message))" in response["body"]
+    assert "ファイル" in response["body"]
+    assert "フィールド" in response["body"]
+    assert "ルール" in response["body"]
     assert "引き継ぎ事項なし" in response["body"]
     assert "subtask-list" in response["body"]
     assert "subtask-accordion" in response["body"]
@@ -139,6 +152,8 @@ def test_dashboard_static_asset_is_served_with_css_mime_type_and_approval_styles
     paragraph_rule = _extract_css_rule(response["body"], ".detail-reading-panel p")
     hover_rule = _extract_css_rule(response["body"], ".detail-reading-panel:hover")
     disabled_rule = _extract_css_rule(response["body"], ".detail-reading-panel.is-disabled")
+    violation_wrap_rule = _extract_css_rule(response["body"], ".log-violation-wrap")
+    violation_table_cells_rule = _extract_css_rule(response["body"], ".log-violation-table td")
     hover_properties = _extract_css_property_names(hover_rule)
     disabled_properties = _extract_css_property_names(disabled_rule)
 
@@ -152,6 +167,10 @@ def test_dashboard_static_asset_is_served_with_css_mime_type_and_approval_styles
     assert ".subtask-item" in response["body"]
     assert ".subtask-accordion" in response["body"]
     assert ".subtask-summary" in response["body"]
+    assert ".log-blocked-reason" in response["body"]
+    assert ".log-violation-table" in response["body"]
+    assert ".task-status-blocked" in response["body"]
+    assert ".task-status-failed" in response["body"]
     assert ".detail-text-block" in response["body"]
     assert ".detail-reading-panel" in response["body"]
     assert ".detail-section-title" in response["body"]
@@ -168,6 +187,10 @@ def test_dashboard_static_asset_is_served_with_css_mime_type_and_approval_styles
     assert "opacity: 0.72" in response["body"]
     assert "box-shadow: 0 0 0 1px rgba(134, 110, 74, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.82)" in response["body"]
     assert "color: inherit" in paragraph_rule
+    assert "max-height: 400px" in violation_wrap_rule
+    assert "overflow-y: auto" in violation_wrap_rule
+    assert "word-break: break-all" in violation_table_cells_rule
+    assert "overflow-wrap: break-word" in violation_table_cells_rule
     assert "background: #fdfaf4" in hover_rule
     assert "border-color: #c5ae87" in hover_rule
     assert "box-shadow: 0 12px 24px rgba(110, 91, 60, 0.08), 0 0 0 1px rgba(134, 110, 74, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.92)" in hover_rule

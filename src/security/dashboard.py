@@ -422,18 +422,28 @@ class SecureDashboard:
         if task is None:
             return self._json_response(404, {"error": "task_not_found", "task_id": task_id})
 
+        is_root_task = task.get("parent_task_id") is None and task.get("root_task_id") == task_id
         with self._database() as connection:
             cursor = self._cursor(connection)
-            cursor.execute(
-                (
-                    "SELECT task_id, root_task_id, service, event_type, message, created_at "
-                    "FROM logs WHERE task_id = %s ORDER BY id ASC"
-                ),
-                (task_id,),
-            )
-            logs = self._fetchall(cursor)
+            if is_root_task:
+                cursor.execute(
+                    (
+                        "SELECT task_id, root_task_id, service, event_type, message, details_json, created_at "
+                        "FROM logs WHERE root_task_id = %s ORDER BY id ASC"
+                    ),
+                    (task_id,),
+                )
+            else:
+                cursor.execute(
+                    (
+                        "SELECT task_id, root_task_id, service, event_type, message, details_json, created_at "
+                        "FROM logs WHERE task_id = %s ORDER BY id ASC"
+                    ),
+                    (task_id,),
+                )
+            logs = self._serialize_log_rows(self._fetchall(cursor))
             subtasks: list[dict[str, Any]] = []
-            if task.get("parent_task_id") is None and task.get("root_task_id") == task_id:
+            if is_root_task:
                 cursor.execute(
                     (
                         "SELECT id, parent_task_id, root_task_id, task_type, phase, status, assigned_service, priority, payload_json, workspace_path, target_repo, target_ref, working_branch, result_summary_md, created_at "
@@ -442,6 +452,11 @@ class SecureDashboard:
                     (task_id, task_id),
                 )
                 subtasks = [self._serialize_task_row(row) for row in self._fetchall(cursor)]
+                logs_by_task_id: dict[Any, list[dict[str, Any]]] = {}
+                for log in logs:
+                    logs_by_task_id.setdefault(log.get("task_id"), []).append(log)
+                for subtask in subtasks:
+                    subtask["logs"] = logs_by_task_id.get(subtask.get("id"), [])
 
         payload = {
             "task": task,
@@ -690,6 +705,21 @@ class SecureDashboard:
         description = getattr(cursor, "description", None)
         columns = [column[0] for column in description]
         return [dict(zip(columns, row, strict=True)) for row in rows]
+
+    def _serialize_log_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        serialized: list[dict[str, Any]] = []
+        for row in rows:
+            details = row.get("details_json")
+            if isinstance(details, str):
+                try:
+                    details = json.loads(details)
+                except json.JSONDecodeError:
+                    details = None
+            serialized_row = dict(row)
+            serialized_row["details_json"] = details
+            serialized_row["details"] = details if isinstance(details, dict) else None
+            serialized.append(serialized_row)
+        return serialized
 
     def _last_insert_id(self, cursor, connection: Any) -> int:
         lastrowid = getattr(cursor, "lastrowid", None)
