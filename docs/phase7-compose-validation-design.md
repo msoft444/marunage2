@@ -18,19 +18,21 @@
 8. relative path は repo root 基準で解決し、absolute path や `..` を含む path traversal、symlink によるワークスペース逸脱は拒否すること。
 9. path 系フィールドに対する未解決の環境変数展開は原則拒否し、初期スライスで許可するのは Feature #6 が生成する runtime scratch を指す専用変数のみとすること。
 10. base compose の `ports` は Feature #6 の上書き対象であり、Feature #5 はポート衝突解決を担当しない。ただし host namespace を使う設定や解釈不能な port 定義は拒否すること。
-11. validation 失敗時は当該 task を `blocked` に遷移させ、違反ルール、対象 service、対象フィールド、正規化後 path などを `logs.details_json` に構造化して残すこと。
-12. Phase 6 orchestration 配下の task で validation が失敗した場合は、既存の blocked 伝播方針に従って root task も `blocked` に遷移できること。
-13. 初期スライスでは DB migration を追加せず、既存の `tasks.runtime_spec_json`、`port_allocator`、`logs`、`WorkspaceSandbox` を再利用すること。
-14. validation 失敗時の `logs.details_json` は Dashboard UI がそのまま展開可能な粒度を持ち、少なくとも「どの compose ファイルの」「どの service / field が」「どの rule_id で」blocked されたかを Phase 0 の実行ログ上で説明できること。
+11. Feature #6 導入後、validator は strict profile と trusted_dind profile を持ち、DinD 内閉域でのみ必要な差分を限定緩和できること。
+12. trusted_dind profile であっても、repo 外 / runtime root 外 path、危険 host mount、`external: true` な network / volume、未許可 device 露出は禁止のままとすること。
+13. validation 失敗時は当該 task を `blocked` に遷移させ、違反ルール、対象 service、対象フィールド、正規化後 path などを `logs.details_json` に構造化して残すこと。
+14. Phase 6 orchestration 配下の task で validation が失敗した場合は、既存の blocked 伝播方針に従って root task も `blocked` に遷移できること。
+15. 初期スライスでは DB migration を追加せず、既存の `tasks.runtime_spec_json`、`port_allocator`、`logs`、`WorkspaceSandbox` を再利用すること。
+16. validation 失敗時の `logs.details_json` は Dashboard UI がそのまま展開可能な粒度を持ち、少なくとも「どの compose ファイルの」「どの service / field が」「どの rule_id で」blocked されたかを Phase 0 の実行ログ上で説明できること。
 
 ## 1.1 非機能要件
 
 1. 安全性: validator は「起動可能か」より「危険でないか」を優先し、解釈不能・未定義・あいまいな入力は許可しないこと。
-2. 一貫性: repo compose 単体の検査と、Feature #6 が生成する runtime override との再検査で同一ルールセットを適用できること。
+2. 一貫性: repo compose 単体の検査と、Feature #6 が生成する runtime override との再検査で同一 validator を使い、strict / trusted_dind の差分を profile で管理できること。
 3. 可観測性: `compose_validation_started`、`compose_validation_blocked`、`compose_validation_passed` を `logs` に記録し、違反ルール ID を追跡可能にすること。
 4. 保守性: compose の読み込み、path 正規化、禁止ルール判定、違反整形を `src/security/compose_validator.py` に集約し、`task_backend.py` や UI 側へ条件分岐を散在させないこと。
 5. 互換性: 既存の `MariaDBTaskBackend.process_next_queued_task()`、`MariaDBAccessor`、`WorkspaceSandbox`、Phase 6 orchestration の blocked 伝播と整合すること。
-6. 拡張性: Feature #6 の port override、Feature #7 の build / up、Feature #8 の health verification が validator の出力をそのまま利用できること。
+6. 拡張性: Feature #6 の port override と DinD trusted profile、Feature #7 の build / up、Feature #8 の health verification が validator の出力をそのまま利用できること。
 7. 決定性: 同一 compose 入力に対して同一 violation 一覧を返し、task ごとの実行順や worker 再起動で判定結果が揺れないこと。
 8. 性能: 初期スライスでは repo 直下 compose 群と runtime override のみを対象にし、大規模 repo 全走査を避けること。
 9. 可理解性: validation による `blocked` は一般的な execution error と UI 上で区別でき、利用者が詳細ログを開けば違反ファイル・対象設定・適用ルールを追加調査なしで把握できること。
@@ -46,12 +48,14 @@
   - `docker-compose.yaml`
 - 初期スライスでは上記候補のうち存在するファイルをすべて検査対象とする。複数存在する場合も安全側で全件を読み込み、少なくとも 1 件に違反があれば失敗とする。
 - Feature #6 以降は runtime scratch 配下の override を明示的な追加入力として validator に渡す。想定配置は `/workspace/{task_id}/runtime/compose.override.yml` とする。
+- Feature #6 では DinD 起動前に strict profile、DinD 起動後に trusted_dind profile を適用する 2 段階運用を前提とする。
 - compose 候補が 1 件も存在しない場合は Feature #7 へ進めないため validation failure とする。
 
 ### 2.2 validator の責務
 
 - validator は YAML を Compose モデル相当の辞書へ読み込み、`services`、`networks`、`volumes`、関連 file path を静的に検査する。
 - validator は Docker / Compose CLI を実行しない。build や up は Feature #7 の責務とし、Feature #5 は静的検査のみに限定する。
+- validator は validation profile (`strict`, `trusted_dind`) を受け取り、profile ごとの差分ルールだけを切り替える。
 - validator の返却値は少なくとも以下を含む。
   - `compose_files`: 検査したファイル一覧
   - `violations`: ルール ID、service 名、field 名、message、normalized_path を持つ違反配列
@@ -84,6 +88,8 @@
 - `ipc: host`
 - `userns_mode: host` 相当の host namespace 利用
 
+`trusted_dind` profile では、DinD 基盤コンテナまたは DinD 内部 docker 利用のために必要な限定ケースに限り `privileged: true` を許容候補とする。ただし host namespace 利用は profile を問わず禁止とする。
+
 #### 2.5.2 ホスト資源露出系
 
 - `docker.sock` の mount
@@ -111,8 +117,8 @@
 
 ### 2.6 Feature #6 / #7 との責務分界
 
-- Feature #5 は compose の静的安全性を判定する。
-- Feature #6 は host port の予約、runtime override の生成、`TASK_RUNTIME_DIR` 相当の埋め込みを担当する。
+- Feature #5 は compose の静的安全性を判定し、strict / trusted_dind profile のルール差分を提供する。
+- Feature #6 は DinD コンテナ起動、host port の予約、runtime override の生成、`TASK_RUNTIME_DIR` 相当の埋め込み、および trusted_dind profile での再検査を担当する。
 - Feature #7 は validator を通過した compose files を使って build / up を行い、成功時の runtime metadata を `tasks.runtime_spec_json` に保存する。
 - `tasks.runtime_spec_json` は validation 前提の実行メタデータ保存先であり、Feature #5 単体では DB に新しい永続フィールドを増やさない。
 - `port_allocator` は Feature #6 で使用する既存テーブルであり、Feature #5 では「後段が利用可能な既存基盤」としてのみ参照する。
@@ -165,7 +171,7 @@
 6. `external: true` の network / volume を拒否できること。
 7. repo 内 relative path と runtime scratch 配下の安全な override だけは許可できること。
 8. validation failure 時に task 状態、log event、違反詳細が一貫して記録されること。
-9. Feature #6 が生成する runtime override に対しても同じ validator を再利用できる設計になっていること。
+9. Feature #6 が生成する runtime override に対しても同じ validator を再利用でき、strict / trusted_dind の責務差分が設計上明示されていること。
 10. Feature #5 の導入にあたり DB migration を追加せず、既存 `runtime_spec_json`、`port_allocator`、`WorkspaceSandbox` を再利用できること。
 11. Dashboard detail / Phase 0 実行ログで、`compose_validation_blocked` が通常エラーではなく安全上の block であること、および violation 一覧を人間が読める形で表示できる設計になっていること。
 

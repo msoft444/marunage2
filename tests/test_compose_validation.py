@@ -277,3 +277,117 @@ def test_compose_validator_blocks_when_any_candidate_file_is_invalid(tmp_path):
     assert result["blocked"] is True
     assert len(result["compose_files"]) == 2
     assert any(violation["rule_id"] == "privileged_container" for violation in result["violations"])
+
+
+def test_compose_validator_trusted_dind_allows_privileged_dind_service_only(tmp_path):
+    result, _, _ = _validate_compose(
+        tmp_path,
+        """
+services:
+  dind:
+    image: docker:27-dind
+    privileged: true
+""".strip()
+        + "\n",
+        validator_kwargs={"profile": "trusted_dind"},
+    )
+
+    assert result["blocked"] is False
+    assert result["violations"] == []
+
+
+def test_compose_validator_trusted_dind_still_blocks_non_dind_privileged_service(tmp_path):
+    result, _, _ = _validate_compose(
+        tmp_path,
+        """
+services:
+  web:
+    image: nginx
+    privileged: true
+""".strip()
+        + "\n",
+        validator_kwargs={"profile": "trusted_dind"},
+    )
+
+    assert result["blocked"] is True
+    assert any(violation["rule_id"] == "privileged_container" for violation in result["violations"])
+
+
+# --- F-07: trusted_dind still blocks path traversal, external resources, dangerous mounts, and devices ---
+
+
+def test_compose_validator_trusted_dind_blocks_path_traversal(tmp_path):
+    result, _, _ = _validate_compose(
+        tmp_path,
+        """
+services:
+  dind:
+    image: docker:27-dind
+    privileged: true
+    volumes:
+      - ../../etc/shadow:/secrets/shadow
+""".strip()
+        + "\n",
+        validator_kwargs={"profile": "trusted_dind"},
+    )
+
+    assert result["blocked"] is True
+    assert any(v["rule_id"] == "path_traversal" for v in result["violations"])
+
+
+def test_compose_validator_trusted_dind_blocks_external_network(tmp_path):
+    result, _, _ = _validate_compose(
+        tmp_path,
+        """
+services:
+  dind:
+    image: docker:27-dind
+    privileged: true
+networks:
+  production_net:
+    external: true
+""".strip()
+        + "\n",
+        validator_kwargs={"profile": "trusted_dind"},
+    )
+
+    assert result["blocked"] is True
+    assert any(v["rule_id"] == "external_network" for v in result["violations"])
+
+
+def test_compose_validator_trusted_dind_blocks_dangerous_host_mount(tmp_path):
+    result, _, _ = _validate_compose(
+        tmp_path,
+        """
+services:
+  dind:
+    image: docker:27-dind
+    privileged: true
+    volumes:
+      - /etc:/mnt/etc
+""".strip()
+        + "\n",
+        validator_kwargs={"profile": "trusted_dind"},
+    )
+
+    assert result["blocked"] is True
+    assert any(v["rule_id"] == "dangerous_host_mount" for v in result["violations"])
+
+
+def test_compose_validator_trusted_dind_blocks_device_exposure(tmp_path):
+    result, _, _ = _validate_compose(
+        tmp_path,
+        """
+services:
+  dind:
+    image: docker:27-dind
+    privileged: true
+    devices:
+      - /dev/sda:/dev/sda
+""".strip()
+        + "\n",
+        validator_kwargs={"profile": "trusted_dind"},
+    )
+
+    assert result["blocked"] is True
+    assert any(v["rule_id"] == "host_device_exposure" for v in result["violations"])

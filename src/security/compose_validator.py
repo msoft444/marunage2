@@ -30,11 +30,15 @@ class ComposeValidator:
         *,
         repo_root: str | Path,
         runtime_root: str | Path | None = None,
+        profile: str = "strict",
         env: dict[str, str] | None = None,
         file_size_limit_bytes: int = 1_000_000,
     ):
         self.repo_root = Path(repo_root).resolve(strict=False)
         self.runtime_root = Path(runtime_root).resolve(strict=False) if runtime_root is not None else None
+        if profile not in {"strict", "trusted_dind"}:
+            raise ValueError(f"unsupported compose validation profile: {profile}")
+        self.profile = profile
         self.env = dict(os.environ)
         if env is not None:
             self.env.update(env)
@@ -132,7 +136,7 @@ class ComposeValidator:
                 )
                 continue
 
-            self._validate_host_mode_field(compose_file, service_name, service, "privileged", "privileged_container", violations)
+            self._validate_privileged_service(compose_file, service_name, service, violations)
             self._validate_host_mode_field(compose_file, service_name, service, "network_mode", "host_network_mode", violations, expected="host")
             self._validate_host_mode_field(compose_file, service_name, service, "pid", "host_pid", violations, expected="host")
             self._validate_host_mode_field(compose_file, service_name, service, "ipc", "host_ipc", violations, expected="host")
@@ -278,6 +282,28 @@ class ComposeValidator:
                     rule_id_outside="secret_file_outside_repo",
                     raw_field=f"secrets.{secret_name}.file",
                 )
+
+    def _validate_privileged_service(
+        self,
+        compose_file: Path,
+        service_name: str,
+        service: dict[str, Any],
+        violations: list[dict[str, Any]],
+    ) -> None:
+        if service.get("privileged") is not True:
+            return
+        if self.profile == "trusted_dind" and self._is_allowed_trusted_dind_service(service_name, service):
+            return
+        violations.append(
+            self._violation(
+                rule_id="privileged_container",
+                compose_file=compose_file,
+                service=service_name,
+                field="privileged",
+                raw_value=True,
+                message="privileged is not allowed",
+            )
+        )
 
     def _validate_host_mode_field(
         self,
@@ -465,6 +491,13 @@ class ComposeValidator:
     @staticmethod
     def _is_external_resource(external: Any) -> bool:
         return external is True or isinstance(external, dict)
+
+    @staticmethod
+    def _is_allowed_trusted_dind_service(service_name: str, service: dict[str, Any]) -> bool:
+        normalized_name = service_name.strip().lower()
+        image = service.get("image")
+        normalized_image = image.strip().lower() if isinstance(image, str) else ""
+        return normalized_name in {"dind", "docker", "docker-dind", "docker_dind"} or "docker:dind" in normalized_image
 
     def _result(self, compose_files: list[Path], violations: list[dict[str, Any]]) -> dict[str, Any]:
         return {
